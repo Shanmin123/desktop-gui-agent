@@ -1,0 +1,28 @@
+# 基础环境（已随 Anaconda base 安装，此处记录版本要求）
+# python>=3.10
+# torch>=2.2          实测 2.6.0+cu124
+
+# 桌面感知
+mss                   # 高性能截图
+opencv-contrib-python  # UI 元素识别、边界框绘制
+easyocr               # OCR，基于 torch，可用 GPU
+paddleocr             # OCR，备选
+paddlepaddle
+
+# 桌面控制
+pyautogui             # 鼠标键盘控制、截图
+pynput                # 键盘监听（急停热键）
+
+# 大模型与 Agent
+transformers
+accelerate
+peft                  # LoRA
+bitsandbytes          # 4/8 bit 量化
+datasets
+langchain
+langchain-community
+
+# 可视化与测试
+matplotlib
+seaborn
+pytest

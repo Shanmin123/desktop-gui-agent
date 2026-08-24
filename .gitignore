@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.vscode/
+.idea/
+
+# 数据、模型权重、日志、截图，都不入库
+data/
+checkpoints/
+outputs/
+logs/*
+!logs/.gitkeep
+*.pt
+*.bin
+*.safetensors
+*.png
+*.jpg
+*.mp4
