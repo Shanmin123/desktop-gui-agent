@@ -87,6 +87,14 @@ def test_倾斜框取外接矩形():
     assert (x2, y2) == (0.305, 0.2)
 
 
+def test_图像尺寸为零时报错():
+    quad = [[0, 0], [1, 0], [1, 1], [0, 1]]
+    with pytest.raises(ValueError):
+        _quad_to_norm_bbox(quad, 0, 100)
+    with pytest.raises(ValueError):
+        _quad_to_norm_bbox(quad, 100, 0)
+
+
 def test_越界坐标被裁到0和1():
     quad = [[-20, -10], [1200, -10], [1200, 600], [-20, 600]]
     assert _quad_to_norm_bbox(quad, 1000, 500) == (0.0, 0.0, 1.0, 1.0)

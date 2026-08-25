@@ -18,11 +18,12 @@ def test_归一化与像素互转():
 
 
 def test_换分辨率后同一归一化坐标落在等比位置():
+    """1430x804 是本机 3840x2160 按模型输入上限缩放后的实际尺寸。"""
     a = ScreenState(width=3840, height=2160)
-    b = ScreenState(width=1428, height=803)
+    b = ScreenState(width=1430, height=804)
     p = (0.25, 0.75)
     assert a.to_pixel(p) == (960, 1620)
-    assert b.to_pixel(p) == (357, 602)
+    assert b.to_pixel(p) == (358, 603)
 
 
 def test_越界坐标被拒绝():
@@ -35,7 +36,9 @@ def test_越界坐标被拒绝():
 
 def test_元素中心点():
     e = Element(id=1, bbox=(0.2, 0.4, 0.4, 0.6), text="保存")
-    assert e.center() == (0.30000000000000004, 0.5) or e.center() == (0.3, 0.5)
+    cx, cy = e.center()
+    assert cx == pytest.approx(0.3)
+    assert cy == pytest.approx(0.5)
 
 
 # --- 动作校验 ---------------------------------------------------------------
