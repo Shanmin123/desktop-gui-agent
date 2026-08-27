@@ -250,3 +250,41 @@ def test_移动到归一化坐标换算出的像素(ctrl):
     want = ctrl.to_pixel((0.75, 0.25))
     ctrl.backend.move(*want)
     assert ctrl.backend.position() == want == (2880, 540)
+
+
+# --- dry_run 必须无条件生效 -------------------------------------------------
+
+
+def test_dry_run_对显式传入的后端也生效():
+    """构造时挑 backend 挡不住这种用法，必须在 _dispatch 里拦。
+
+    Controller(backend=真实后端, dry_run=True) 一度会真的操作桌面。
+    """
+    backend = RecordingBackend()
+    c = Controller(backend=backend, dry_run=True)
+
+    for a in [
+        Action("click", point=(0.5, 0.5)),
+        Action("type", text="hello"),
+        Action("hotkey", text="ctrl+s"),
+        Action("drag", point=(0.1, 0.1), point2=(0.9, 0.9)),
+    ]:
+        assert c.execute(a).ok
+
+    assert backend.calls == [], "dry_run 下不该有任何后端调用"
+    assert len(c.dry_run_log) == 4, "本该执行的动作要记下来"
+
+
+def test_dry_run_下等待不真的sleep():
+    import time as _t
+
+    c = Controller(backend=RecordingBackend(), dry_run=True, wait_seconds=5)
+    t0 = _t.perf_counter()
+    assert c.execute(Action("wait")).ok
+    assert _t.perf_counter() - t0 < 0.5
+
+
+def test_dry_run_仍然执行安全拦截():
+    c = Controller(backend=RecordingBackend(), dry_run=True)
+    assert not c.execute(Action("hotkey", text="ctrl+alt+delete")).ok
+    assert c.dry_run_log == [], "被拒的动作不该进 dry_run 记录"

@@ -122,8 +122,20 @@ class PyAutoGUIBackend:
         """
         import pyperclip
 
+        try:
+            previous = pyperclip.paste()  # 用完还回去，别把用户的剪贴板覆盖了
+        except Exception:
+            previous = None
+
         pyperclip.copy(text)
         self._pg.hotkey("ctrl", "v")
+
+        if previous is not None:
+            time.sleep(0.1)  # 等粘贴真正完成，否则还原会把内容抢回去
+            try:
+                pyperclip.copy(previous)
+            except Exception:
+                pass
 
     def hotkey(self, keys: Sequence[str]) -> None:
         self._pg.hotkey(*keys)
@@ -135,6 +147,7 @@ class RecordingBackend:
     def __init__(self, width: int = 3840, height: int = 2160) -> None:
         self._size = (width, height)
         self.calls: List[tuple] = []
+        self._pos = (0, 0)
 
     def size(self) -> Tuple[int, int]:
         return self._size
@@ -144,7 +157,7 @@ class RecordingBackend:
         self._pos = (x, y)
 
     def position(self) -> Tuple[int, int]:
-        return getattr(self, "_pos", (0, 0))
+        return self._pos
 
     def click(self, x, y, button="left", clicks=1):
         self.calls.append(("click", x, y, button, clicks))
@@ -191,6 +204,7 @@ class Controller:
         self.blocked_hotkeys = blocked_hotkeys
         self.blocked_text = tuple(blocked_text)
         self.history: List[Tuple[Action, ActionResult]] = []
+        self.dry_run_log: List[Action] = []  # dry_run 下本该执行的动作
 
     # -- 坐标换算 -----------------------------------------------------------
 
@@ -236,9 +250,15 @@ class Controller:
         if t in ("finished", "call_user"):
             return  # 终止信号，没有对应的桌面操作
 
+        # dry_run 必须在这里拦，不能只靠构造时挑 backend：
+        # Controller(backend=PyAutoGUIBackend(), dry_run=True) 会真的操作桌面。
+        # dry_run 是第一道安全防线，无论用哪个 backend 都要生效。
+        if self.dry_run:
+            self.dry_run_log.append(action)
+            return
+
         if t == "wait":
-            if not self.dry_run:
-                time.sleep(self.wait_seconds)
+            time.sleep(self.wait_seconds)
             return
 
         if t == "click":
