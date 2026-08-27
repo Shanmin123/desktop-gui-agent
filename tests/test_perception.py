@@ -178,3 +178,35 @@ def test_imread_文件不存在时报错(tmp_path):
 
     with pytest.raises((IOError, OSError, FileNotFoundError)):
         imread(str(tmp_path / "不存在.png"))
+
+
+# --- 联调：分散取点 ---------------------------------------------------------
+
+
+def test_分散取点覆盖不同网格区域():
+    """校准要取分散的点，边角上的坐标问题才暴露得出来。"""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from calibrate import pick_spread
+
+    # 左上角堆 5 个，右下角只有 1 个
+    elems = [Element(id=i, bbox=(0.01, 0.01, 0.05, 0.05)) for i in range(5)]
+    elems.append(Element(id=99, bbox=(0.9, 0.9, 0.95, 0.95)))
+
+    picked = pick_spread(elems, 2)
+    assert len(picked) == 2
+    assert 99 in [e.id for e in picked], "轮流取桶时应当立刻覆盖到右下角那个"
+
+
+def test_取点数量不超过可用元素():
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from calibrate import pick_spread
+
+    elems = [Element(id=i, bbox=(0.1 * i, 0.1, 0.1 * i + 0.05, 0.15)) for i in range(3)]
+    assert len(pick_spread(elems, 10)) == 3
+    assert pick_spread([], 5) == []

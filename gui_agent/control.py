@@ -85,6 +85,14 @@ class PyAutoGUIBackend:
     def size(self) -> Tuple[int, int]:
         return tuple(self._pg.size())
 
+    def move(self, x: int, y: int) -> None:
+        """只移动不点击。不是 Action，是联调和校准用的原语。"""
+        self._pg.moveTo(x, y, duration=self.move_duration)
+
+    def position(self) -> Tuple[int, int]:
+        """读回光标当前位置，用来验证移动是否落到了预期像素。"""
+        return tuple(self._pg.position())
+
     def click(self, x: int, y: int, button: str = "left", clicks: int = 1) -> None:
         self._pg.click(x, y, button=button, clicks=clicks, duration=self.move_duration)
 
@@ -130,6 +138,13 @@ class RecordingBackend:
 
     def size(self) -> Tuple[int, int]:
         return self._size
+
+    def move(self, x, y):
+        self.calls.append(("move", x, y))
+        self._pos = (x, y)
+
+    def position(self) -> Tuple[int, int]:
+        return getattr(self, "_pos", (0, 0))
 
     def click(self, x, y, button="left", clicks=1):
         self.calls.append(("click", x, y, button, clicks))

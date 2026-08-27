@@ -235,3 +235,18 @@ def test_dry_run_默认用假后端():
     c = Controller(dry_run=True)
     assert isinstance(c.backend, RecordingBackend)
     assert c.execute(Action("click", point=(0.5, 0.5))).ok
+
+
+# --- 联调用的移动与读位置 ---------------------------------------------------
+
+
+def test_移动记录并更新位置(ctrl):
+    ctrl.backend.move(100, 200)
+    assert ctrl.backend.calls == [("move", 100, 200)]
+    assert ctrl.backend.position() == (100, 200)
+
+
+def test_移动到归一化坐标换算出的像素(ctrl):
+    want = ctrl.to_pixel((0.75, 0.25))
+    ctrl.backend.move(*want)
+    assert ctrl.backend.position() == want == (2880, 540)
