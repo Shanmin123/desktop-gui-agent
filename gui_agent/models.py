@@ -12,9 +12,8 @@ smart_resize 之后的像素。所以要用同一个 smart_resize 算出实际�
 from __future__ import annotations
 
 import base64
-import json
 import re
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
