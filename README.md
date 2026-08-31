@@ -27,6 +27,7 @@ scripts/
     calibrate.py         感知与控制联调，测坐标端到端误差
     prepare_data.py      公开数据集预处理
     eval_grounding.py    UI 元素定位精度评测
+    md2pdf.py            文档转 PDF
 tests/              单元测试
 docs/               调研报告、环境配置文档、实验报告
 ```
