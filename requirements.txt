@@ -1,37 +1,31 @@
-# 基础环境（Anaconda base，Python 3.10.9）
-# torch 2.6.0+cu124 已随环境安装，不在此处声明，避免误升级
+# 基础环境：Python 3.10，torch 2.6+cu124（随 Anaconda 环境安装，不在此声明）
 
-# --- 版本约束，三条都是实测踩出来的，不要放开 ---
-numpy==1.26.4
-# numpy 2.x 会让 easyocr、paddleocr 报 "numpy.dtype size changed"（二进制不兼容）
+# 版本固定，改动会影响 OCR 与 transformers 的可用性
+numpy==1.26.4                       # 2.x 与 easyocr、paddleocr 的编译版本不兼容
+opencv-python-headless==4.10.0.84   # 5.x 要求 numpy>=2
+huggingface-hub>=1.3.0,<2.0         # transformers 5.3.0 的要求
 
-opencv-python-headless==4.10.0.84
-# easyocr 的依赖。5.x 要求 numpy>=2，会连带把 numpy 顶上去
-
-huggingface-hub>=1.3.0,<2.0
-# transformers 5.3.0 要求 >=1.3.0，环境里原本是 0.33.1，import 会失败
-
-# --- 桌面感知 ---
-mss                      # 高性能截图
-opencv-contrib-python==4.10.0.84   # UI 元素识别、边界框绘制（paddlex 锁定此版本）
-easyocr                  # OCR 主用，基于 torch，可走 GPU
-paddleocr                # OCR 备选
+# 桌面感知
+mss
+opencv-contrib-python==4.10.0.84
+easyocr
+paddleocr
 paddlepaddle
 
-# --- 桌面控制 ---
-pyautogui                # 鼠标键盘控制
-pynput                   # 键盘监听（急停热键）
+# 桌面控制
+pyautogui
+pynput
 
-# --- 大模型与 Agent ---
+# 大模型与 Agent
 transformers
 accelerate
-peft                     # LoRA
-bitsandbytes             # 4/8 bit 量化
+peft
+bitsandbytes
 datasets
 langchain
 langchain-community
 
-# --- 可视化与测试 ---
+# 可视化与测试
 matplotlib
 seaborn
 pytest
