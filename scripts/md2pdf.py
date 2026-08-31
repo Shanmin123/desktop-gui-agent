@@ -5,7 +5,8 @@
 
 用法：
     python scripts/md2pdf.py docs/第1周实验报告.md
-    python scripts/md2pdf.py docs/*.md -o ../交付物
+    python scripts/md2pdf.py docs/*.md -o ../pdf
+    python scripts/md2pdf.py a.md b.md --merge 合集.pdf   # 合成一份
 """
 
 import argparse
@@ -19,7 +20,9 @@ CSS = """
 @page { size: A4; margin: 20mm 18mm; }
 body{ font-family:"Microsoft YaHei","PingFang SC",sans-serif; color:#1a1a1a;
       line-height:1.7; font-size:10.5pt; }
-h1{ font-size:19pt; margin:0 0 4pt; padding-bottom:6pt; border-bottom:2px solid #2b5fa8; }
+h1{ font-size:19pt; margin:0 0 4pt; padding-bottom:6pt; border-bottom:2px solid #2b5fa8;
+    page-break-before:always; }
+h1:first-of-type{ page-break-before:auto; }
 h2{ font-size:13pt; margin:18pt 0 8pt; color:#1c3f6e; page-break-after:avoid; }
 h3{ font-size:11pt; margin:12pt 0 6pt; color:#243447; page-break-after:avoid; }
 p{ margin:6pt 0; }
@@ -55,15 +58,23 @@ def find_browser() -> str:
     return found
 
 
-def convert(md: Path, out_pdf: Path, browser: str) -> None:
-    """中间文件放在 ASCII 临时目录，避免浏览器处理中文路径出问题。"""
+def convert(sources, out_pdf: Path, browser: str) -> None:
+    """把一个或多个 Markdown 转成一份 PDF。
+
+    中间文件放在 ASCII 临时目录，避免浏览器处理中文路径出问题。
+    """
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         css, html, pdf = tmp / "s.css", tmp / "d.html", tmp / "d.pdf"
         css.write_text(CSS, encoding="utf-8")
 
+        src = tmp / "in.md"
+        src.write_text(
+            "\n\n".join(Path(f).read_text(encoding="utf-8").strip() for f in sources),
+            encoding="utf-8",
+        )
         subprocess.run(
-            ["pandoc", str(md), "-f", "gfm", "-t", "html5", "-s",
+            ["pandoc", str(src), "-f", "gfm", "-t", "html5", "-s",
              "--metadata", "title=", "-c", str(css),
              "--embed-resources", "--standalone", "-o", str(html)],
             check=True, capture_output=True,
@@ -74,7 +85,7 @@ def convert(md: Path, out_pdf: Path, browser: str) -> None:
             check=True, capture_output=True, timeout=120,
         )
         if not pdf.exists():
-            raise SystemExit(f"{md.name} 打印失败")
+            raise SystemExit(f"打印失败：{out_pdf.name}")
 
         out_pdf.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(pdf, out_pdf)
@@ -84,19 +95,29 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="+", help="要转换的 Markdown 文件")
     ap.add_argument("-o", "--out-dir", default=None, help="输出目录，默认与源文件同级")
+    ap.add_argument("--merge", metavar="PDF", default=None, help="合成一份 PDF，按给定顺序拼接")
     args = ap.parse_args()
 
     if not shutil.which("pandoc"):
         raise SystemExit("找不到 pandoc")
     browser = find_browser()
 
-    for f in args.files:
-        md = Path(f)
-        if not md.exists():
-            print(f"  跳过，文件不存在：{md}")
-            continue
+    files = [Path(f) for f in args.files]
+    missing = [f for f in files if not f.exists()]
+    if missing:
+        raise SystemExit("文件不存在：" + "、".join(str(m) for m in missing))
+
+    if args.merge:
+        out = Path(args.merge)
+        if args.out_dir:
+            out = Path(args.out_dir) / out.name
+        convert(files, out, browser)
+        print(f"  {len(files)} 份合成  ->  {out}  ({out.stat().st_size // 1024} KB)")
+        return
+
+    for md in files:
         out = (Path(args.out_dir) if args.out_dir else md.parent) / (md.stem + ".pdf")
-        convert(md, out, browser)
+        convert([md], out, browser)
         print(f"  {md.name}  ->  {out}  ({out.stat().st_size // 1024} KB)")
 
 
