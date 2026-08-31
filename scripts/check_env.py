@@ -96,6 +96,15 @@ def check_screenshot():
     except Exception as e:
         record("pyautogui", False, str(e))
 
+    if mss_size:
+        w, h = mss_size
+        # Claude Computer Use 文档推荐 1024x768 或 1280x720，不建议超过 1920x1080
+        if max(w, h) <= 1280 and w * h <= 1_150_000:
+            record("运行分辨率", True, f"{w}x{h}，在推荐范围内，截图可原样送模型")
+        else:
+            record("运行分辨率", False,
+                   f"{w}x{h} 高于推荐值，截图会被缩放，定位精度下降。建议设为 1280x720")
+
 
 def check_simple_imports():
     libs = [
