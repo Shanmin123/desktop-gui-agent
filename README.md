@@ -12,7 +12,7 @@ python scripts/check_env.py          # 检查环境与基础工具库
 python scripts/check_env.py --ocr    # 额外实测 OCR，首次会下载模型权重
 ```
 
-`requirements.txt` 里 numpy、opencv-python-headless、huggingface-hub 三项是硬约束，放开会导致 OCR 或 transformers 无法导入，原因见 `docs/环境配置文档.md`。
+`requirements.txt` 里 numpy、opencv-python-headless、huggingface-hub 三项是硬约束，放开会导致 OCR 或 transformers 无法导入，各自的原因写在该文件的注释里。
 
 ## 结构
 
