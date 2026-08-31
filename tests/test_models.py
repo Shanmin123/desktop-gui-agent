@@ -1,5 +1,3 @@
-import pytest
-
 from gui_agent.models import GROUNDING_PROMPT, box_center, parse_box
 
 
