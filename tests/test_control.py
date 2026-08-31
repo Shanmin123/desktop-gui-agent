@@ -149,3 +149,30 @@ def test_move_and_read_position(ctrl):
     want = ctrl.to_pixel((0.75, 0.25))
     ctrl.backend.move(*want)
     assert ctrl.backend.position() == want == (2880, 540)
+
+
+# --- 可配置项 ---------------------------------------------------------------
+
+
+def test_custom_blocklists_can_be_injected():
+    """黑名单是构造参数，不同场景可以换一套。"""
+    c = Controller(backend=RecordingBackend(),
+                   blocked_hotkeys=frozenset({"ctrl+s"}),
+                   blocked_text=(r"^绝密",))
+    assert not c.execute(Action("hotkey", text="ctrl+s")).ok
+    assert not c.execute(Action("type", text="绝密文件")).ok
+    assert c.execute(Action("hotkey", text="ctrl+alt+delete")).ok  # 不在新名单里
+    assert c.execute(Action("type", text="format c:")).ok
+
+
+def test_run_with_empty_list(ctrl):
+    assert ctrl.run([]) == [] and ctrl.backend.calls == []
+
+
+def test_wait_seconds_configurable():
+    import time as _t
+
+    c = Controller(backend=RecordingBackend(), wait_seconds=0.05)
+    t0 = _t.perf_counter()
+    c.execute(Action("wait"))
+    assert 0.03 < _t.perf_counter() - t0 < 0.5

@@ -99,3 +99,101 @@ def test_failed_step_records_error():
                 ok=False, error="目标窗口不存在")
     data = json.loads(Trajectory("t1", "x", [step], success=False).to_json())
     assert data["steps"][0]["error"] == "目标窗口不存在" and data["success"] is False
+
+
+# --- 默认值与边界 -----------------------------------------------------------
+
+
+def test_screenstate_defaults():
+    s = ScreenState(width=1920, height=1080)
+    assert s.image_path == "" and s.elements == [] and s.timestamp > 0
+
+
+def test_step_defaults():
+    step = Step(ScreenState(800, 600), Action("wait"))
+    assert step.ok is True and step.error == "" and step.elapsed == 0.0
+
+
+def test_to_pixel_rounds_to_nearest():
+    s = ScreenState(width=1000, height=1000)
+    assert s.to_pixel((0.1234, 0.5678)) == (123, 568)
+
+
+def test_to_norm_is_inverse_of_to_pixel():
+    s = ScreenState(width=1280, height=720)
+    for px in [(0, 0), (640, 360), (1280, 720)]:
+        assert s.to_pixel(s.to_norm(*px)) == px
+
+
+def test_element_center_at_corners():
+    assert Element(id=0, bbox=(0.0, 0.0, 0.0, 0.0)).center() == (0.0, 0.0)
+    assert Element(id=0, bbox=(1.0, 1.0, 1.0, 1.0)).center() == (1.0, 1.0)
+
+
+def test_element_optional_fields():
+    e = Element(id=3, bbox=(0.1, 0.1, 0.2, 0.2))
+    assert e.text == "" and e.source == "ocr" and e.confidence == 1.0
+
+
+# --- 动作细节 ---------------------------------------------------------------
+
+
+def test_action_types_are_exactly_ten():
+    from gui_agent.schema import ACTION_TYPES
+
+    assert len(ACTION_TYPES) == 10
+    assert set(ACTION_TYPES) == {
+        "click", "left_double", "right_single", "drag", "scroll",
+        "type", "hotkey", "wait", "finished", "call_user",
+    }
+
+
+@pytest.mark.parametrize("d", ["up", "down", "left", "right"])
+def test_scroll_accepts_four_directions(d):
+    assert Action("scroll", point=(0.5, 0.5), direction=d).direction == d
+
+
+def test_integer_coords_cast_to_float():
+    a = Action("click", point=(0, 1))
+    assert a.point == (0.0, 1.0) and isinstance(a.point[0], float)
+
+
+def test_thought_preserved():
+    a = Action("click", point=(0.5, 0.5), thought="点开始菜单")
+    assert a.thought == "点开始菜单"
+    assert Action.from_dict(a.to_dict()).thought == "点开始菜单"
+
+
+def test_boundary_coords_accepted():
+    Action("click", point=(0.0, 0.0))
+    Action("click", point=(1.0, 1.0))
+    with pytest.raises(ValueError):
+        Action("click", point=(0.0, 1.0001))
+
+
+# --- 轨迹细节 ---------------------------------------------------------------
+
+
+def test_empty_trajectory():
+    t = Trajectory(task_id="t", instruction="x")
+    assert t.n_steps == 0 and t.wall_time == 0
+    assert json.loads(t.to_json())["steps"] == []
+
+
+def test_trajectory_success_true():
+    t = Trajectory(task_id="t", instruction="x", success=True)
+    assert json.loads(t.to_json())["success"] is True
+
+
+def test_trajectory_json_is_valid_utf8():
+    t = Trajectory(task_id="打开浏览器", instruction="打开 Chrome")
+    data = json.loads(t.to_json())
+    assert data["task_id"] == "打开浏览器"
+
+
+def test_trajectory_records_element_count_not_elements():
+    """日志只记元素个数，不把整份识别结果塞进去。"""
+    screen = ScreenState(1920, 1080, elements=[Element(id=i, bbox=(0, 0, 0.1, 0.1)) for i in range(7)])
+    t = Trajectory("t", "x", [Step(screen, Action("wait"))])
+    s = json.loads(t.to_json())["steps"][0]["screen"]
+    assert s["n_elements"] == 7 and "elements" not in s

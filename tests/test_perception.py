@@ -90,3 +90,109 @@ def test_imwrite_imread_non_ascii_path(tmp_path):
 def test_imread_missing_file_raises(tmp_path):
     with pytest.raises((IOError, OSError)):
         imread(str(tmp_path / "不存在.png"))
+
+
+# --- 缩放的更多情形 ---------------------------------------------------------
+
+
+def test_portrait_orientation():
+    """竖屏时长边是高，缩放系数按高算。"""
+    s = scale_factor(1080, 1920)
+    assert round(1080 * s) <= DEFAULT_LONG_EDGE and round(1920 * s) <= DEFAULT_LONG_EDGE
+
+
+def test_square_screen():
+    s = scale_factor(2000, 2000)
+    assert 2000 * s * 2000 * s <= DEFAULT_MAX_PIXELS + 1000
+
+
+def test_recommended_resolutions_need_no_scaling():
+    """Claude 文档推荐的两档分辨率下不需要缩放，截图原样送模型。"""
+    assert scale_factor(1024, 768) == 1.0
+    assert scale_factor(1280, 720) == 1.0
+
+
+def test_just_above_pixel_limit_gets_scaled():
+    s = scale_factor(1600, 900)  # 1.44 MP，超过 1.15 MP 上限
+    assert s < 1.0
+
+
+def test_extreme_aspect_ratio_bound_by_long_edge():
+    s = scale_factor(20000, 50)
+    assert s == pytest.approx(DEFAULT_LONG_EDGE / 20000)
+
+
+def test_resize_preserves_dtype_and_channels():
+    img = np.random.randint(0, 255, (2160, 3840, 3), dtype=np.uint8)
+    small, _ = resize_for_model(img)
+    assert small.dtype == np.uint8 and small.shape[2] == 3
+
+
+def test_resize_result_is_contiguous():
+    img = np.zeros((2160, 3840, 3), dtype=np.uint8)
+    small, _ = resize_for_model(img)
+    assert small.flags["C_CONTIGUOUS"]
+
+
+# --- 坐标归一化的更多情形 ---------------------------------------------------
+
+
+def test_quad_with_float_coords():
+    quad = [[10.5, 20.5], [110.5, 20.5], [110.5, 40.5], [10.5, 40.5]]
+    x1, y1, x2, y2 = _quad_to_norm_bbox(quad, 1000, 100)
+    assert (round(x1, 4), round(x2, 4)) == (0.0105, 0.1105)
+
+
+def test_degenerate_quad_gives_zero_area_bbox():
+    quad = [[50, 50]] * 4
+    x1, y1, x2, y2 = _quad_to_norm_bbox(quad, 100, 100)
+    assert x1 == x2 == y1 == y2 == 0.5
+
+
+def test_bbox_stays_within_unit_square():
+    quad = [[-999, -999], [9999, -999], [9999, 9999], [-999, 9999]]
+    for v in _quad_to_norm_bbox(quad, 640, 480):
+        assert 0.0 <= v <= 1.0
+
+
+# --- 画框 -------------------------------------------------------------------
+
+
+def test_annotate_many_elements():
+    img = np.zeros((600, 800, 3), dtype=np.uint8)
+    elems = [Element(id=i, bbox=(i / 60, 0.1, i / 60 + 0.01, 0.15)) for i in range(50)]
+    assert annotate(img, elems).shape == img.shape
+
+
+def test_annotate_label_stays_inside_at_top_edge():
+    """框贴着上边缘时，编号不能画到画布外面。"""
+    img = np.zeros((200, 200, 3), dtype=np.uint8)
+    out = annotate(img, [Element(id=1, bbox=(0.1, 0.0, 0.3, 0.05))])
+    assert out.any()
+
+
+# --- 图片读写 ---------------------------------------------------------------
+
+
+def test_imwrite_jpg_extension(tmp_path):
+    target = tmp_path / "图.jpg"
+    imwrite(str(target), np.full((30, 30, 3), 200, dtype=np.uint8))
+    assert target.exists() and imread(str(target)).shape == (30, 30, 3)
+
+
+def test_imwrite_unsupported_extension_raises(tmp_path):
+    with pytest.raises((IOError, OSError, Exception)):
+        imwrite(str(tmp_path / "x.qqq"), np.zeros((5, 5, 3), dtype=np.uint8))
+
+
+def test_imread_on_corrupt_file(tmp_path):
+    bad = tmp_path / "坏图.png"
+    bad.write_bytes(b"not a png")
+    with pytest.raises((IOError, OSError)):
+        imread(str(bad))
+
+
+def test_default_limits_match_claude_doc():
+    """对应 Claude 文档里较早模型那一档：长边 1568、总像素约 1.15 MP。"""
+    assert DEFAULT_LONG_EDGE == 1568
+    assert DEFAULT_MAX_PIXELS == 1_150_000
