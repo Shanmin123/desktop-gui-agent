@@ -8,7 +8,7 @@ from gui_agent.schema import Action, Element, ScreenState, Step, Trajectory
 # --- 坐标 -------------------------------------------------------------------
 
 
-def test_归一化与像素互转且越界被拒():
+def test_norm_pixel_roundtrip_and_bounds():
     s = ScreenState(width=3840, height=2160)
     assert s.to_pixel((0.5, 0.5)) == (1920, 1080)
     assert s.to_pixel((1.0, 1.0)) == (3840, 2160)
@@ -17,14 +17,14 @@ def test_归一化与像素互转且越界被拒():
         s.to_pixel((1.2, 0.5))
 
 
-def test_换分辨率后同一归一化坐标落在等比位置():
+def test_norm_point_scales_across_resolutions():
     """1430x804 是本机 3840x2160 按模型输入上限缩放后的尺寸。"""
     p = (0.25, 0.75)
     assert ScreenState(width=3840, height=2160).to_pixel(p) == (960, 1620)
     assert ScreenState(width=1430, height=804).to_pixel(p) == (358, 603)
 
 
-def test_元素中心点():
+def test_element_center():
     cx, cy = Element(id=1, bbox=(0.2, 0.4, 0.4, 0.6), text="保存").center()
     assert (cx, cy) == (pytest.approx(0.3), pytest.approx(0.5))
 
@@ -32,7 +32,7 @@ def test_元素中心点():
 # --- 动作 -------------------------------------------------------------------
 
 
-def test_十个动作类型都能构造():
+def test_all_ten_action_types_construct():
     Action("click", point=(0.5, 0.5))
     Action("left_double", point=(0.5, 0.5))
     Action("right_single", point=(0.5, 0.5))
@@ -45,7 +45,7 @@ def test_十个动作类型都能构造():
     Action("call_user")
 
 
-def test_构造时即校验():
+def test_validated_at_construction():
     """模型输出的动作不可信，让它在构造时就炸，比带着坏坐标传到 pyautogui 好查。"""
     with pytest.raises(ValueError, match="缺少必需字段 point"):
         Action("click")
@@ -57,7 +57,7 @@ def test_构造时即校验():
         Action("click", point=(1920, 1080))
 
 
-def test_终止动作判定():
+def test_terminal_actions():
     assert Action("finished").is_terminal() and Action("call_user").is_terminal()
     assert not Action("click", point=(0.5, 0.5)).is_terminal()
 
@@ -65,14 +65,14 @@ def test_终止动作判定():
 # --- 序列化 -----------------------------------------------------------------
 
 
-def test_动作字典往返且不输出空字段():
+def test_action_dict_roundtrip_omits_empty():
     a = Action("drag", point=(0.1, 0.2), point2=(0.8, 0.9), thought="拖到回收站")
     b = Action.from_dict(a.to_dict())
     assert (b.point, b.point2, b.thought) == (a.point, a.point2, a.thought)
     assert Action("wait").to_dict() == {"type": "wait"}
 
 
-def test_from_dict_容忍json的列表坐标与多余字段():
+def test_from_dict_accepts_list_coords_and_extra_keys():
     a = Action.from_dict({"type": "click", "point": [0.5, 0.5], "unknown": 1})
     assert a.point == (0.5, 0.5)
 
@@ -80,7 +80,7 @@ def test_from_dict_容忍json的列表坐标与多余字段():
 # --- 轨迹 -------------------------------------------------------------------
 
 
-def test_轨迹统计与json输出():
+def test_trajectory_stats_and_json():
     screen = ScreenState(width=3840, height=2160, image_path="logs/1.png")
     t = Trajectory(task_id="open_browser", instruction="打开浏览器")
     t.steps.append(Step(screen, Action("click", point=(0.1, 0.9)), elapsed=1.5))
@@ -94,7 +94,7 @@ def test_轨迹统计与json输出():
     assert data["success"] is None
 
 
-def test_失败步骤记录错误信息():
+def test_failed_step_records_error():
     step = Step(ScreenState(1920, 1080), Action("click", point=(0.5, 0.5)),
                 ok=False, error="目标窗口不存在")
     data = json.loads(Trajectory("t1", "x", [step], success=False).to_json())
