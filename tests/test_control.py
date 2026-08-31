@@ -100,7 +100,7 @@ def test_alt_f4_allowed(ctrl):
 
 
 def test_destructive_commands_blocked_normal_text_allowed():
-    """黑名单最初用子串匹配，把 "format the paragraph" 也拦了。"""
+    """规则锚定在开头，正常英文里出现 format、rm 等词不应被拦。"""
     c = Controller(backend=RecordingBackend())
     assert not c.execute(Action("type", text="format c:")).ok
     assert not c.execute(Action("type", text="rm -rf /")).ok
@@ -109,7 +109,7 @@ def test_destructive_commands_blocked_normal_text_allowed():
 
 
 def test_dry_run_applies_to_explicit_backend():
-    """一度只在构造时挑 backend，传真实后端加 dry_run 会真的操作桌面。"""
+    """dry_run 与用哪个 backend 无关，都不应产生实际操作。"""
     c = Controller(backend=RecordingBackend(), dry_run=True)
     assert c.execute(Action("click", point=(0.5, 0.5))).ok
     assert not c.execute(Action("hotkey", text="ctrl+alt+delete")).ok  # 拦截仍生效

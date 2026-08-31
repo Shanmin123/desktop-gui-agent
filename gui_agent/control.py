@@ -2,12 +2,10 @@
 
 对应大纲第 2 周第 3 项。支持 schema.py 里定义的 10 个动作。
 
-坐标一律是归一化的 0~1，落到像素由本模块用 `backend.size()` 换算。这一点顺带
-免疫了 DPI 缩放问题：不管截图端报告多大、控制端报告多大，两边各自按自己的尺寸
-做归一化和反归一化，点击位置都是对的。
+坐标为归一化的 0~1，由本模块用 `backend.size()` 换算成像素，因此不受 DPI 缩放影响。
 
-真正操作桌面的部分收在 PyAutoGUIBackend 里，Controller 只做换算、校验和记录。
-测试注入一个假 backend，就能在不碰真实鼠标的前提下验证全部逻辑。
+真正操作桌面的部分收在 PyAutoGUIBackend 里，Controller 只做换算、校验和记录，
+测试时注入 RecordingBackend 替换。
 """
 
 from __future__ import annotations
@@ -23,14 +21,10 @@ from .schema import Action
 # 基础任务里就有「关闭应用」。
 BLOCKED_HOTKEYS = frozenset({"ctrl+alt+delete", "ctrl+alt+del", "win+l", "meta+l"})
 
-# 明显是破坏性命令的输入内容，命中即拒。对应大纲「合规与落地说明」第 2 条。
+# 形似破坏性命令的输入，命中即拒。规则锚定在开头，避免误伤正常文本。
 #
-# 必须锚定在开头并且要求命令的形态，不能用子串匹配：最初写成 "format " 时，
-# "format the paragraph" 这种正常英文也被拦了，单元测试当场抓到。
-#
-# 这道防线本身是不可靠的，因为同一段文字打进 Word 无害、打进 cmd 危险，光看
-# 文本判断不出上下文。它只能挡住最明显的情况，真正的保障是 dry_run、FAILSAFE，
-# 以及把测试放在虚拟机里跑。
+# 文本本身判断不出上下文（同一段话打进文档无害、打进命令行危险），这里只挡最
+# 明显的情况，主要的保障是 dry_run 和 FAILSAFE。
 BLOCKED_TEXT = (
     r"^format\s+[a-z]:",       # format c:
     r"^rm\s+-[rf]{1,2}\b",     # rm -rf
@@ -117,8 +111,7 @@ class PyAutoGUIBackend:
     def paste(self, text: str) -> None:
         """非 ASCII 走剪贴板。
 
-        pyautogui 的 KEYBOARD_KEYS 里只有 ASCII，write() 打不出中文，实测确认。
-        ScreenAgent 也是靠剪贴板解决这个问题的。
+        pyautogui 的 KEYBOARD_KEYS 只含 ASCII，write() 打不出中文。
         """
         import pyperclip
 
@@ -250,9 +243,7 @@ class Controller:
         if t in ("finished", "call_user"):
             return  # 终止信号，没有对应的桌面操作
 
-        # dry_run 必须在这里拦，不能只靠构造时挑 backend：
-        # Controller(backend=PyAutoGUIBackend(), dry_run=True) 会真的操作桌面。
-        # dry_run 是第一道安全防线，无论用哪个 backend 都要生效。
+        # dry_run 在这里拦，与用哪个 backend 无关
         if self.dry_run:
             self.dry_run_log.append(action)
             return

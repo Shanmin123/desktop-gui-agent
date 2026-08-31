@@ -4,9 +4,8 @@
 
 两种后端共用一个 `ask(image, prompt) -> str` 接口，上层不关心模型跑在哪。
 
-坐标处理是这里最容易出错的地方。Qwen2.5-VL 输出的坐标不是原图像素，而是它内部
-smart_resize 之后的像素。所以要用同一个 smart_resize 算出实际送进去的尺寸，再拿它
-归一化。这个约定不靠猜，用 ScreenSpot 的真值验证过，见 scripts/eval_grounding.py。
+Qwen2.5-VL 输出的坐标位于它内部 smart_resize 之后的像素空间，不是原图像素。归一化
+时要用同一个 smart_resize 算出的尺寸，正确性由 scripts/eval_grounding.py 验证。
 """
 
 from __future__ import annotations

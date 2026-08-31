@@ -7,10 +7,8 @@
    `1.0`、`长边上限/长边`、`sqrt(总像素上限/总像素)` 三者最小值。
 2. 所有元素坐标一律归一化到 0~1（见 schema.py），下游不需要知道实际分辨率。
 
-OCR 跑在**原始分辨率**上，不跑在缩放图上。这是一个权衡：实测 4K 原图 2.43 秒识别
-出 65 处文字，缩到 1430x804 是 1.55 秒但只剩 22 处。省下的 0.9 秒不值丢掉三分之二
-的文字，因为 Agent 要靠元素位置去点。原因是 easyocr 检测阶段内部本来就会把长边压
-到 2560，再往下缩就低于它的工作分辨率了。数据见 docs/环境配置文档.md。
+OCR 跑在原始分辨率上。easyocr 检测阶段内部会把长边压到 2560，在更小的缩放图上跑
+会明显掉识别率，缩放只服务于模型的输入限制。耗时与识别率数据见 docs/环境配置文档.md。
 """
 
 from __future__ import annotations
@@ -34,9 +32,8 @@ DEFAULT_MAX_PIXELS = 1_150_000
 def imwrite(path: str, img: np.ndarray) -> None:
     """存图。
 
-    不能直接用 cv2.imwrite：在 Windows 上它按 ANSI 代码页处理路径，遇到非 ASCII
-    路径会**返回 False 但不抛异常**，文件根本没写出来。本项目的上级目录名是中文，
-    实测必然触发。改成先 imencode 再用 Python 的文件接口写二进制。
+    cv2.imwrite 在 Windows 上按 ANSI 代码页处理路径，非 ASCII 路径会返回 False 且
+    不抛异常，文件不会写出。改用 imencode 加 Python 的文件接口。
     """
     p = Path(path)
     ok, buf = cv2.imencode(p.suffix or ".png", img)
@@ -126,9 +123,8 @@ class Perception:
     def capture(self) -> np.ndarray:
         """抓一帧，返回 BGR 图（物理分辨率，内存连续）。
 
-        asarray 出来是 mss 缓冲区上的视图，切掉 alpha 之后仍是非连续视图，cv2 对
-        非连续数组的处理不可靠，所以要拷一份。只拷这一次：先切片再 copy，拷的是
-        3 通道；反过来先 copy 再切片会把 alpha 也拷上，4K 下等于白搬 8MB。
+        asarray 出来是 mss 缓冲区上的视图，切掉 alpha 后仍不连续，cv2 对非连续数组
+        的处理不可靠，所以拷一份。先切片再 copy，避免多拷一个 alpha 通道。
         """
         shot = self._sct.grab(self._sct.monitors[self.monitor])
         return np.asarray(shot)[:, :, :3].copy()  # BGRA -> BGR
@@ -146,12 +142,9 @@ class Perception:
     def ocr(self, img: np.ndarray, min_confidence: float = 0.3) -> List[Element]:
         """在传入的图上跑 OCR，返回归一化坐标的元素列表。
 
-        坐标按传入图的尺寸归一化，因此原图和缩放图上的结果可以直接比较、互相套用。
-        但**能识别出多少文字是不一样的**，缩放图上会少很多，所以实际调用请传原图。
+        坐标按传入图的尺寸归一化。传原图，缩放图上识别率明显更低。
 
-        传入的是 BGR（OpenCV 约定），但 easyocr 把三通道数组当 RGB 处理，内部走
-        COLOR_RGB2GRAY，通道顺序不对会把红蓝的权重对调，彩色控件上会掉对比度，
-        所以这里先转一次。
+        easyocr 把三通道数组当 RGB 处理，所以先从 BGR 转一次。
         """
         h, w = img.shape[:2]
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -177,11 +170,8 @@ class Perception:
     ) -> Tuple[ScreenState, np.ndarray]:
         """返回 (屏幕状态, 送模型用的缩放图)。
 
-        OCR 跑在**原始分辨率**上，缩放图只用于送模型。实测（见 docs/环境配置文档.md）
-        同一张 3840x2160 的截图，原图 2.43 秒识别出 65 处文字，缩到 1430x804 是
-        1.55 秒但只剩 22 处。这里选精度不选那 0.9 秒。
-
-        两边坐标都归一化，所以元素框画在缩放图上依然对得上。
+        OCR 跑在原始分辨率上，缩放图只用于送模型。两边坐标都归一化，所以元素框
+        画在缩放图上依然对得上。
         """
         img = self.capture()
         h, w = img.shape[:2]
@@ -212,8 +202,7 @@ class Perception:
 def annotate(img: np.ndarray, elements: List[Element], show_text: bool = False) -> np.ndarray:
     """在图上画出元素的边界框和编号，用于人工核对定位是否准确。
 
-    默认只画编号。show_text=True 会把识别到的文字也画上，但 OpenCV 的 putText
-    渲染不了中文，中文会显示成一串问号，只在确认界面全是英文时才开。
+    默认只画编号。show_text=True 会画上识别到的文字，但 putText 渲染不了中文。
     """
     out = img.copy()
     h, w = out.shape[:2]
@@ -247,9 +236,7 @@ def benchmark(n: int = 5, monitor: int = 1) -> dict:
         resize_for_model(img, p.long_edge, p.max_pixels)
     resize_ms = (time.perf_counter() - t0) / n * 1000
 
-    # 预热：光取 p.reader 只是加载权重，第一次真正推理还会带上 CUDA 上下文初始化。
-    # 不先跑这一次的话，这笔开销会全记在下面第一轮（缩放图）头上。
-    p.ocr(small)
+    p.ocr(small)  # 预热，第一次推理带 CUDA 上下文初始化
 
     t0 = time.perf_counter()
     small_elems = p.ocr(small)

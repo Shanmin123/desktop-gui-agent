@@ -2,9 +2,7 @@
 
 对应大纲第 3 周第 1 项。
 
-不把图片解出来另存一份，只写清单：图片留在 HuggingFace 缓存里，训练时按
-(数据集, 下标) 现取。ShowUI 的截图是 3360x2100，7496 张重新落盘要十几 GB，
-没必要。
+只写清单，不另存图片：图片留在 HuggingFace 缓存里，训练时按 (数据集, 下标) 取。
 
 输出：
     data/grounding/train.jsonl    ShowUI-desktop 划分出的训练集
@@ -39,11 +37,7 @@ DESKTOP_SOURCES = {"windows", "macos"}
 
 
 def meta_rows(ds) -> list:
-    """只取元数据，跳过图片列。
-
-    直接 `ds[i]` 会把那一条的图片也解码出来。ShowUI 有 7496 条 3360x2100 的
-    截图，光为了读 bbox 和 instruction 解 7496 次图，脚本会卡好几分钟。
-    """
+    """只取元数据，跳过图片列。直接索引 `ds[i]` 会连带解码图片。"""
     cols = [c for c in ds.column_names if c != "image"]
     return ds.select_columns(cols).to_list()
 
@@ -73,20 +67,14 @@ def to_record(sample, source: str, index: int) -> dict:
 def safe_name(text: str, limit: int = 20) -> str:
     """把指令截短并清成合法文件名。
 
-    只替换 '/' 是不够的：ShowUI 第 9 条指令是
-    "Two small icons: a video camera and a phone, top right corner."，
-    其中的冒号在 Windows 上会被当成 NTFS 备用数据流的分隔符，
-    结果生成一个 0 字节、没有后缀的文件，而且不报错。
+    Windows 下冒号会被当成 NTFS 数据流分隔符，需要和其他非法字符一并替换。
     """
     cleaned = "".join("_" if c in '<>:"/\\|?*' or ord(c) < 32 else c for c in text[:limit])
     return cleaned.strip(" .") or "unnamed"
 
 
 def dump_samples(ds, records, out_dir: Path, n: int = 6, tag: str = "") -> None:
-    """抽几条把框画到原图上，确认坐标约定和我们的一致。
-
-    如果对方的 bbox 其实是 [x, y, w, h]，画出来的框会明显偏，一眼能看出来。
-    """
+    """抽几条把框画到原图上，人工确认坐标约定与本项目一致。"""
     out_dir.mkdir(parents=True, exist_ok=True)
     for r in random.sample(records, min(n, len(records))):
         img = np.array(ds[r["index"]]["image"].convert("RGB"))[:, :, ::-1]  # RGB->BGR
