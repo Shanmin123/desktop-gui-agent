@@ -21,6 +21,7 @@ gui_agent/
     control.py      鼠标键盘控制、坐标换算、安全限制
     models.py       大模型调用接口，本地部署与 API 两种后端
     agent.py        任务规划、动作解析、结果反馈
+    display.py      临时切换屏幕分辨率
 scripts/
     check_env.py         环境检查
     bench_perception.py  感知各环节耗时实测
