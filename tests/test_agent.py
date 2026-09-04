@@ -275,3 +275,50 @@ def test_loop_aborts_when_stuck(screen):
     assert t.steps[-1].action.type == "call_user"
     assert "重复" in t.steps[-1].error
     assert t.success is False
+
+
+# --- 像素坐标兜底 -----------------------------------------------------------
+
+
+def test_pixel_coords_converted_to_normalized(screen):
+    """提示词要求归一化，但模型实测会回像素值，如 (899, 84)。"""
+    _, a = parse_step('{"action": {"type": "click", "point": [899, 84]}}', screen,
+                      model_size=(1430, 804))
+    assert a.point == pytest.approx((899 / 1430, 84 / 804))
+
+
+def test_normalized_coords_left_alone(screen):
+    _, a = parse_step('{"action": {"type": "click", "point": [0.6, 0.1]}}', screen,
+                      model_size=(1430, 804))
+    assert a.point == (0.6, 0.1)
+
+
+def test_pixel_coords_clamped_to_one(screen):
+    _, a = parse_step('{"action": {"type": "click", "point": [9999, 9999]}}', screen,
+                      model_size=(1430, 804))
+    assert a.point == (1.0, 1.0)
+
+
+def test_drag_both_points_converted(screen):
+    _, a = parse_step('{"action": {"type": "drag", "point": [100, 50], "point2": [700, 400]}}',
+                      screen, model_size=(1430, 804))
+    assert a.point[0] < 1 and a.point2[0] < 1
+
+
+def test_pixel_coords_without_model_size_still_fail(screen):
+    """没有模型尺寸就没法换算，让它照常报错而不是瞎猜。"""
+    with pytest.raises(ValueError, match="归一化"):
+        parse_step('{"action": {"type": "click", "point": [899, 84]}}', screen)
+
+
+class FakeVLMWithSize(FakeVLM):
+    def resized_size(self, h, w):
+        return (804, 1430)  # (rh, rw)
+
+
+def test_agent_passes_model_size(screen):
+    vlm = FakeVLMWithSize(['{"action": {"type": "click", "point": [715, 402]}}',
+                           '{"action": {"type": "finished"}}'])
+    t = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm).run("x")
+    assert t.steps[0].ok
+    assert t.steps[0].action.point == pytest.approx((0.5, 0.5), abs=0.01)

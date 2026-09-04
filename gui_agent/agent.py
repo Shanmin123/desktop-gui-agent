@@ -130,11 +130,27 @@ def _extract_json(text: str) -> Optional[dict]:
     return None
 
 
-def parse_step(text: str, state: ScreenState) -> Tuple[str, Action]:
+def _to_norm(p, model_size: Optional[Tuple[int, int]]):
+    """坐标超出 0~1 时按像素处理，除以模型看到的尺寸换成归一化。
+
+    提示词要求归一化坐标，但 Qwen2.5-VL 本来就是按像素训练的，实测会回
+    (899, 84) 这样的值。与其让整步失败，不如按它的坐标空间换算。
+    """
+    if not (isinstance(p, (tuple, list)) and len(p) == 2):
+        return p
+    if max(p) <= 1.0 or model_size is None:
+        return p
+    w, h = model_size
+    return (min(p[0] / w, 1.0), min(p[1] / h, 1.0))
+
+
+def parse_step(
+    text: str, state: ScreenState, model_size: Optional[Tuple[int, int]] = None
+) -> Tuple[str, Action]:
     """把模型输出解析成 (thought, Action)。
 
     element 编号在这里换成归一化坐标，编号不存在时抛 ValueError 由上层记为失败。
-    解析不出动作时返回 call_user，让人接手而不是瞎点。
+    模型给的坐标超出 0~1 时按 model_size 换算。解析不出动作时返回 call_user。
     """
     data = _extract_json(text)
     if not data or not isinstance(data.get("action"), dict):
@@ -153,6 +169,8 @@ def parse_step(text: str, state: ScreenState) -> Tuple[str, Action]:
     for k in ("point", "point2"):
         if isinstance(raw.get(k), list):
             raw[k] = tuple(raw[k])
+        if raw.get(k) is not None:
+            raw[k] = _to_norm(raw[k], model_size)
 
     return thought, Action.from_dict(raw)
 
@@ -181,9 +199,17 @@ class Agent:
             state, model_img = self.perception.perceive()
             prompt = build_prompt(instruction, state, traj.steps)
 
+            model_size = None
+            if hasattr(self.vlm, "resized_size"):
+                h, w = model_img.shape[:2]
+                rh, rw = self.vlm.resized_size(h, w)
+                model_size = (rw, rh)
+
             t0 = time.perf_counter()
             try:
-                thought, action = parse_step(self.vlm.ask(model_img, prompt), state)
+                thought, action = parse_step(
+                    self.vlm.ask(model_img, prompt), state, model_size
+                )
             except ValueError as e:
                 traj.steps.append(
                     Step(state, Action("call_user", thought=str(e)),
