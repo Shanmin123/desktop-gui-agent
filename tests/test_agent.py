@@ -211,3 +211,22 @@ def test_thought_is_recorded(screen):
                    '{"action": {"type": "finished"}}'])
     t = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm).run("x")
     assert t.steps[0].action.thought == "先点保存按钮"
+
+
+# --- 命令行的动作描述 -------------------------------------------------------
+
+
+def test_describe_covers_all_action_types():
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from run_agent import describe
+
+    assert "0.500" in describe(Action("click", point=(0.5, 0.5)))
+    assert "drag" in describe(Action("drag", point=(0.1, 0.1), point2=(0.9, 0.9)))
+    assert "down" in describe(Action("scroll", point=(0.5, 0.5), direction="down"))
+    assert "'hello'" in describe(Action("type", text="hello"))
+    assert "'ctrl+s'" in describe(Action("hotkey", text="ctrl+s"))
+    assert describe(Action("finished")) == "finished"
+    assert describe(Action("wait")) == "wait"

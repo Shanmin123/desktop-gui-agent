@@ -23,6 +23,7 @@ gui_agent/
     agent.py        任务规划、动作解析、结果反馈
     display.py      临时切换屏幕分辨率
 scripts/
+    run_agent.py         命令行入口，给一句话让智能体去做
     check_env.py         环境检查
     bench_perception.py  感知各环节耗时实测
     calibrate.py         感知与控制联调，测坐标端到端误差
@@ -42,6 +43,15 @@ docs/               调研报告、环境配置文档、实验报告
 **OCR 跑原始分辨率，缩放只用于模型输入。** 在缩放图上跑 OCR 会明显掉识别率，实测数据见 `docs/环境配置文档.md`。
 
 **图片读写统一走 `perception.imwrite` / `imread`。** `cv2.imwrite` 在非 ASCII 路径下返回 False 但不抛异常，文件不会写出来。
+
+## 运行
+
+```bash
+python scripts/run_agent.py "打开计算器"          # dry-run，只打印动作
+python scripts/run_agent.py "打开计算器" --live   # 真的操作桌面
+```
+
+默认 dry-run。`--live` 会真实操作桌面，开始前有倒计时，鼠标甩到屏幕左上角可强制中断。
 
 ## 测试
 
