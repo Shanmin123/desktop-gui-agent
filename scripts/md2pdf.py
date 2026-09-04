@@ -40,24 +40,30 @@ a{ color:#2b5fa8; text-decoration:none; }
 """
 
 BROWSERS = [
-    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
 ]
 
 
-def find_browser() -> str:
-    for p in BROWSERS:
-        if Path(p).exists():
-            return p
-    found = shutil.which("msedge") or shutil.which("chrome")
+def find_browsers() -> list:
+    """按顺序返回所有可用的浏览器。
+
+    不只挑第一个：无头打印有时会静默失败，退出码 0 但不产出 PDF。实测遇到过
+    Edge 对所有文档都这样而 Chrome 正常，所以逐个试到能出 PDF 为止。
+    """
+    found = [p for p in BROWSERS if Path(p).exists()]
+    for name in ("chrome", "msedge"):
+        w = shutil.which(name)
+        if w and w not in found:
+            found.append(w)
     if not found:
-        raise SystemExit("找不到 Edge 或 Chrome，无法打印 PDF")
+        raise SystemExit("找不到 Chrome 或 Edge，无法打印 PDF")
     return found
 
 
-def convert(sources, out_pdf: Path, browser: str) -> None:
+def convert(sources, out_pdf: Path, browsers: list) -> None:
     """把一个或多个 Markdown 转成一份 PDF。
 
     中间文件放在 ASCII 临时目录，避免浏览器处理中文路径出问题。
@@ -78,13 +84,20 @@ def convert(sources, out_pdf: Path, browser: str) -> None:
              "--embed-resources", "--standalone", "-o", str(html)],
             check=True, capture_output=True,
         )
-        subprocess.run(
-            [browser, "--headless=new", "--disable-gpu", "--no-pdf-header-footer",
-             f"--print-to-pdf={pdf}", html.as_uri()],
-            check=True, capture_output=True, timeout=120,
-        )
-        if not pdf.exists():
-            raise SystemExit(f"打印失败：{out_pdf.name}")
+        # 单独的用户数据目录：用户已经开着浏览器时，无头实例复用默认目录会起不来
+        for i, browser in enumerate(browsers):
+            subprocess.run(
+                [browser, "--headless=new", "--disable-gpu", "--no-pdf-header-footer",
+                 f"--user-data-dir={tmp / f'profile{i}'}",
+                 f"--print-to-pdf={pdf}", html.as_uri()],
+                capture_output=True, timeout=120,
+            )
+            if pdf.exists():
+                break
+        else:
+            raise SystemExit(
+                f"打印失败：{out_pdf.name}，试过 " + "、".join(Path(b).name for b in browsers)
+            )
 
         out_pdf.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(pdf, out_pdf)
@@ -99,7 +112,7 @@ def main() -> None:
 
     if not shutil.which("pandoc"):
         raise SystemExit("找不到 pandoc")
-    browser = find_browser()
+    browsers = find_browsers()
 
     files = [Path(f) for f in args.files]
     missing = [f for f in files if not f.exists()]
@@ -110,13 +123,13 @@ def main() -> None:
         out = Path(args.merge)
         if args.out_dir:
             out = Path(args.out_dir) / out.name
-        convert(files, out, browser)
+        convert(files, out, browsers)
         print(f"  {len(files)} 份合成  ->  {out}  ({out.stat().st_size // 1024} KB)")
         return
 
     for md in files:
         out = (Path(args.out_dir) if args.out_dir else md.parent) / (md.stem + ".pdf")
-        convert([md], out, browser)
+        convert([md], out, browsers)
         print(f"  {md.name}  ->  {out}  ({out.stat().st_size // 1024} KB)")
 
 
