@@ -86,6 +86,8 @@ def main() -> None:
                 "task": task.id, "run": run + 1, "passed": passed,
                 "steps": traj.n_steps, "wall_time": round(traj.wall_time, 2),
                 "actions": [s.action.type for s in traj.steps],
+                # 存完整轨迹，失败归因要看模型当时怎么想的
+                "trajectory": json.loads(traj.to_json()),
             })
 
     perception.close()
