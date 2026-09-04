@@ -23,6 +23,7 @@ from .schema import Action, ScreenState, Step, Trajectory
 
 MAX_STEPS = 15
 MAX_ELEMENTS = 60  # 送进提示词的元素上限，太多会挤占上下文
+REPEAT_LIMIT = 3   # 同一个动作连续这么多次就停，避免在无效操作上空转
 
 SYSTEM_PROMPT = """你在操作一台 Windows 电脑，目标是完成用户给的任务。
 
@@ -67,6 +68,23 @@ def format_history(steps: List[Step], limit: int = 5) -> str:
         status = "成功" if s.ok else f"失败：{s.error}"
         out.append(f"  第{i}步 {s.action.type} → {status}")
     return "\n".join(out)
+
+
+def _signature(action: Action) -> tuple:
+    """动作的可比较特征，用来判断是不是在重复同一件事。"""
+    return (action.type, action.point, action.point2, action.text, action.direction)
+
+
+def is_stuck(steps: List[Step], limit: int = REPEAT_LIMIT) -> bool:
+    """末尾连续 limit 步是同一个动作，说明卡住了。
+
+    动作没让界面产生变化时，模型看到的还是同一屏，会一直给同样的动作。实测在
+    dry-run 下三步给出了完全相同的点击。
+    """
+    if len(steps) < limit:
+        return False
+    sigs = [_signature(s.action) for s in steps[-limit:]]
+    return len(set(sigs)) == 1
 
 
 def build_prompt(instruction: str, state: ScreenState, steps: List[Step]) -> str:
@@ -148,11 +166,13 @@ class Agent:
         controller: Controller,
         vlm,
         max_steps: int = MAX_STEPS,
+        repeat_limit: int = REPEAT_LIMIT,
     ) -> None:
         self.perception = perception
         self.controller = controller
         self.vlm = vlm
         self.max_steps = max_steps
+        self.repeat_limit = repeat_limit
 
     def run(self, instruction: str, task_id: str = "") -> Trajectory:
         traj = Trajectory(task_id=task_id or instruction[:24], instruction=instruction)
@@ -182,6 +202,13 @@ class Agent:
                 traj.success = True
                 break
             if action.type == "call_user" or not result.ok:
+                traj.success = False
+                break
+            if is_stuck(traj.steps, self.repeat_limit):
+                traj.steps.append(
+                    Step(state, Action("call_user", thought="连续重复同一个动作，界面没有变化"),
+                         ok=False, error=f"连续 {self.repeat_limit} 步重复同一动作")
+                )
                 traj.success = False
                 break
 

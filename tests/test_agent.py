@@ -190,7 +190,8 @@ def test_loop_stops_on_bad_element_id(screen):
 
 
 def test_loop_respects_max_steps(screen):
-    vlm = FakeVLM(['{"action": {"type": "wait"}}'] * 20)
+    """动作各不相同，不会触发卡住检测，走到步数上限为止。"""
+    vlm = FakeVLM([f'{{"action": {{"type": "click", "point": [0.{i}, 0.5]}}}}' for i in range(9)])
     ctrl = Controller(backend=RecordingBackend(), dry_run=True)
     t = Agent(FakePerception(screen), ctrl, vlm, max_steps=3).run("永远做不完")
     assert t.n_steps == 3 and t.success is False
@@ -230,3 +231,47 @@ def test_describe_covers_all_action_types():
     assert "'ctrl+s'" in describe(Action("hotkey", text="ctrl+s"))
     assert describe(Action("finished")) == "finished"
     assert describe(Action("wait")) == "wait"
+
+
+# --- 卡住检测 ---------------------------------------------------------------
+
+
+def test_is_stuck_detects_repeated_action(screen):
+    from gui_agent.agent import is_stuck
+
+    same = [Step(screen, Action("click", point=(0.5, 0.5))) for _ in range(3)]
+    assert is_stuck(same)
+
+
+def test_is_stuck_ignores_different_actions(screen):
+    from gui_agent.agent import is_stuck
+
+    mixed = [Step(screen, Action("click", point=(0.5, 0.5))),
+             Step(screen, Action("click", point=(0.6, 0.5))),
+             Step(screen, Action("click", point=(0.5, 0.5)))]
+    assert not is_stuck(mixed)
+
+
+def test_is_stuck_needs_enough_steps(screen):
+    from gui_agent.agent import is_stuck
+
+    assert not is_stuck([Step(screen, Action("wait"))] * 2)
+
+
+def test_is_stuck_distinguishes_by_text(screen):
+    from gui_agent.agent import is_stuck
+
+    steps = [Step(screen, Action("type", text=t)) for t in ("a", "a", "b")]
+    assert not is_stuck(steps)
+
+
+def test_loop_aborts_when_stuck(screen):
+    """界面不变时模型会一直给同一个动作，不能任由它跑到步数上限。"""
+    vlm = FakeVLM(['{"action": {"type": "click", "element": 1}}'] * 10)
+    a = Agent(FakePerception(screen), Controller(backend=RecordingBackend(1920, 1080)), vlm,
+              max_steps=10)
+    t = a.run("点不动的东西")
+    assert t.n_steps == 4  # 三次重复 + 一条终止记录
+    assert t.steps[-1].action.type == "call_user"
+    assert "重复" in t.steps[-1].error
+    assert t.success is False
