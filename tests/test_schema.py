@@ -197,3 +197,37 @@ def test_trajectory_records_element_count_not_elements():
     t = Trajectory("t", "x", [Step(screen, Action("wait"))])
     s = json.loads(t.to_json())["steps"][0]["screen"]
     assert s["n_elements"] == 7 and "elements" not in s
+
+
+# --- 动作别名 ---------------------------------------------------------------
+
+
+def test_left_click_alias():
+    """实测 Qwen2.5-VL 输出的是 left_click，不是 UI-TARS 的 click。"""
+    assert Action("left_click", point=(0.5, 0.5)).type == "click"
+
+
+@pytest.mark.parametrize("alias,canonical", [
+    ("single_click", "click"), ("tap", "click"),
+    ("double_click", "left_double"), ("right_click", "right_single"),
+    ("type_text", "type"), ("input", "type"),
+    ("key", "hotkey"), ("press", "hotkey"),
+    ("done", "finished"), ("finish", "finished"), ("ask_user", "call_user"),
+])
+def test_action_aliases_normalized(alias, canonical):
+    kw = {}
+    if canonical in ("click", "left_double", "right_single"):
+        kw["point"] = (0.5, 0.5)
+    elif canonical in ("type", "hotkey"):
+        kw["text"] = "x"
+    assert Action(alias, **kw).type == canonical
+
+
+def test_alias_still_validates_required_fields():
+    with pytest.raises(ValueError, match="缺少必需字段"):
+        Action("left_click")
+
+
+def test_unknown_alias_still_rejected():
+    with pytest.raises(ValueError, match="未知动作类型"):
+        Action("teleport", point=(0.5, 0.5))

@@ -49,6 +49,26 @@ _REQUIRED = {
 
 SCROLL_DIRECTIONS = ("up", "down", "left", "right")
 
+# 模型常用别的命名给出动作，实测 Qwen2.5-VL 输出的是 left_click 而不是 click。
+# 这些写法语义明确，直接归一，不必让整条任务因为叫法不同而失败。
+ACTION_ALIAS = {
+    "left_click": "click",
+    "single_click": "click",
+    "tap": "click",
+    "double_click": "left_double",
+    "left_double_click": "left_double",
+    "right_click": "right_single",
+    "type_text": "type",
+    "input": "type",
+    "key": "hotkey",
+    "hotkeys": "hotkey",
+    "press": "hotkey",
+    "done": "finished",
+    "finish": "finished",
+    "complete": "finished",
+    "ask_user": "call_user",
+}
+
 
 def _check_point(name: str, p: Any) -> None:
     if not (isinstance(p, (tuple, list)) and len(p) == 2):
@@ -126,6 +146,7 @@ class Action:
         self.validate()
 
     def validate(self) -> None:
+        self.type = ACTION_ALIAS.get(self.type, self.type)
         if self.type not in ACTION_TYPES:
             raise ValueError(f"未知动作类型 {self.type!r}，可选：{ACTION_TYPES}")
         for name in _REQUIRED[self.type]:

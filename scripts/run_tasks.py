@@ -60,7 +60,7 @@ def main() -> None:
             label = f"{task.id}" + (f" #{run + 1}" if args.repeat > 1 else "")
             print(f"\n── {label}：{task.instruction}")
             try:
-                task.setup()
+                baseline = task.setup() or {}
             except Exception as e:
                 print(f"   setup 失败：{e}")
                 continue
@@ -71,7 +71,7 @@ def main() -> None:
 
             passed = False
             try:
-                passed = bool(task.check())
+                passed = bool(task.check(baseline))
             except Exception as e:
                 print(f"   验收函数出错：{e}")
             try:
