@@ -19,9 +19,12 @@ from .schema import Action
 
 # 会锁屏或打断会话的组合键，执行会直接被拒。alt+f4 不在其中，因为大纲第 4 周的
 # 基础任务里就有「关闭应用」。
-BLOCKED_HOTKEYS = frozenset({"ctrl+alt+delete", "ctrl+alt+del", "win+l", "meta+l"})
+#
+# 匹配前先按 _KEY_ALIAS 归一并当作无序集合比较，所以 "ctrl+alt+del"、
+# "alt+ctrl+delete" 这些写法都会命中，不必在这里逐一列出。
+BLOCKED_HOTKEYS = frozenset({"ctrl+alt+delete", "win+l"})
 
-# 形似破坏性命令的输入，命中即拒。规则锚定在开头，避免误伤正常文本。
+# 形似破坏性命令的输入，命中即拒。规则锚定在行首，多行文本逐行检查。
 #
 # 文本本身判断不出上下文（同一段话打进文档无害、打进命令行危险），这里只挡最
 # 明显的情况，主要的保障是 dry_run 和 FAILSAFE。
@@ -195,7 +198,10 @@ class Controller:
         self.drag_duration = drag_duration
         self.wait_seconds = wait_seconds
         self.blocked_hotkeys = blocked_hotkeys
-        self.blocked_text = tuple(blocked_text)
+        self._blocked_key_sets = frozenset(
+            frozenset(normalize_hotkey(h)) for h in blocked_hotkeys
+        )
+        self.blocked_text = tuple(re.compile(p, re.MULTILINE) for p in blocked_text)
         self.history: List[Tuple[Action, ActionResult]] = []
         self.dry_run_log: List[Action] = []  # dry_run 下本该执行的动作
 
@@ -210,14 +216,15 @@ class Controller:
     def _reject(self, action: Action) -> Optional[str]:
         """返回拒绝理由，None 表示放行。"""
         if action.type == "hotkey":
-            combo = "+".join(normalize_hotkey(action.text))
-            if combo in self.blocked_hotkeys:
-                return f"组合键 {combo} 在禁用名单里"
+            keys = normalize_hotkey(action.text)
+            # 按无序集合比较：模型给 alt+ctrl+delete 和 ctrl+alt+delete 是一回事
+            if frozenset(keys) in self._blocked_key_sets:
+                return f"组合键 {'+'.join(keys)} 在禁用名单里"
         if action.type == "type" and action.text:
             low = action.text.strip().lower()
             for pat in self.blocked_text:
-                if re.search(pat, low):
-                    return f"输入内容像是破坏性命令，命中规则 {pat!r}"
+                if pat.search(low):
+                    return f"输入内容像是破坏性命令，命中规则 {pat.pattern!r}"
         return None
 
     # -- 执行 ---------------------------------------------------------------

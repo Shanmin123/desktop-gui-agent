@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -97,14 +99,31 @@ def test_unknown_element_id_raises(screen):
         parse_step('{"action": {"type": "click", "element": 99}}', screen)
 
 
-def test_unparseable_output_becomes_call_user(screen):
-    thought, a = parse_step("我不知道该做什么", screen)
-    assert a.type == "call_user" and "无法解析" in thought
+def test_unparseable_output_raises(screen):
+    with pytest.raises(ValueError, match="无法解析"):
+        parse_step("我不知道该做什么", screen)
 
 
-def test_action_without_type_becomes_call_user(screen):
-    _, a = parse_step('{"thought": "x"}', screen)
-    assert a.type == "call_user"
+def test_action_without_type_raises(screen):
+    with pytest.raises(ValueError, match="无法解析"):
+        parse_step('{"thought": "x"}', screen)
+
+
+def test_unknown_action_type_raises(screen):
+    with pytest.raises(ValueError, match="未知动作类型"):
+        parse_step('{"action": {"type": "swipe", "point": [0.5, 0.5]}}', screen)
+
+
+@pytest.mark.parametrize("eid", ["[1, 2]", '{"a": 1}', '"保存"'])
+def test_non_integer_element_id_raises(screen, eid):
+    """模型可能把 element 写成列表或字典，int() 对它们抛的是 TypeError。"""
+    with pytest.raises(ValueError, match="不是整数"):
+        parse_step('{"action": {"type": "click", "element": %s}}' % eid, screen)
+
+
+def test_string_element_id_still_works(screen):
+    _, a = parse_step('{"action": {"type": "click", "element": "1"}}', screen)
+    assert a.point == pytest.approx((0.3, 0.45))
 
 
 def test_type_and_hotkey_actions(screen):
@@ -187,6 +206,100 @@ def test_loop_stops_on_bad_element_id(screen):
     a = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm)
     t = a.run("点不存在的东西")
     assert t.n_steps == 1 and not t.steps[0].ok
+    assert t.success is False  # 解析失败要判成失败，不能留 None 当没判过
+
+
+def test_unparseable_output_is_a_failed_step(screen):
+    """解析失败不能记成成功的 call_user，否则微调数据里就是错标。"""
+    vlm = FakeVLM(["模型今天不想输出 JSON"])
+    t = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm).run("x")
+    assert t.n_steps == 1 and not t.steps[0].ok and t.steps[0].error
+    assert t.success is False
+
+
+def test_perception_failure_keeps_earlier_steps(screen):
+    """截图这类瞬时故障只废掉当前这步，前面跑出来的轨迹要留住。"""
+
+    class FlakyPerception(FakePerception):
+        def __init__(self, state):
+            super().__init__(state)
+            self.n = 0
+
+        def perceive(self, **kw):
+            self.n += 1
+            if self.n == 3:
+                raise OSError("屏幕抓取失败")
+            return super().perceive(**kw)
+
+    vlm = FakeVLM(['{"action": {"type": "wait"}}', '{"action": {"type": "scroll", '
+                   '"point": [0.5, 0.5], "direction": "down"}}'])
+    ctrl = Controller(backend=RecordingBackend(), dry_run=True)
+    t = Agent(FlakyPerception(screen), ctrl, vlm).run("x")
+    assert t.n_steps == 3 and t.steps[0].ok and t.steps[1].ok
+    assert not t.steps[2].ok and "屏幕抓取失败" in t.steps[2].error
+    assert t.success is False
+
+
+def test_model_failure_keeps_earlier_steps(screen):
+    class BoomVLM(FakeVLM):
+        def ask(self, image, prompt, **kw):
+            if self.prompts:
+                raise RuntimeError("显存不足")
+            return super().ask(image, prompt, **kw)
+
+    vlm = BoomVLM(['{"action": {"type": "wait"}}'])
+    ctrl = Controller(backend=RecordingBackend(), dry_run=True)
+    t = Agent(FakePerception(screen), ctrl, vlm).run("x")
+    assert t.n_steps == 2 and t.steps[0].ok and "显存不足" in t.steps[1].error
+    assert t.success is False
+
+
+# --- 截图落盘 ---------------------------------------------------------------
+
+
+class SavingPerception(FakePerception):
+    """把 save_to 转交给真正的写盘逻辑，验证 Agent 有把路径传下来。"""
+
+    def perceive(self, run_ocr=True, save_to=None):
+        state, img = super().perceive()
+        if save_to:
+            from gui_agent.perception import imwrite
+
+            imwrite(save_to, img)
+            state = ScreenState(state.width, state.height, image_path=save_to,
+                                elements=state.elements)
+        return state, img
+
+
+def test_no_screenshots_saved_by_default(screen, tmp_path):
+    vlm = FakeVLM(['{"action": {"type": "finished"}}'])
+    t = Agent(SavingPerception(screen), Controller(backend=RecordingBackend()), vlm).run("x")
+    assert t.steps[0].screen.image_path == ""
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_shot_dir_saves_one_image_per_step(screen, tmp_path):
+    """轨迹要当微调样本用，每步得有配对的截图。"""
+    vlm = FakeVLM(['{"action": {"type": "wait"}}', '{"action": {"type": "finished"}}'])
+    ctrl = Controller(backend=RecordingBackend(), dry_run=True)
+    t = Agent(SavingPerception(screen), ctrl, vlm, shot_dir=str(tmp_path)).run(
+        "保存/文件:测试", task_id="打开 记事本/1"
+    )
+    assert t.n_steps == 2
+    assert len(list(tmp_path.glob("*.png"))) == 2
+    for s in t.steps:
+        assert s.screen.image_path and Path(s.screen.image_path).exists()
+
+
+def test_shot_path_sanitizes_task_id(screen, tmp_path):
+    """task_id 默认取自指令，里面可能有 / : 这类不能当文件名的字符。"""
+    a = Agent(FakePerception(screen), Controller(backend=RecordingBackend()),
+              FakeVLM([]), shot_dir=str(tmp_path))
+    from gui_agent.schema import Trajectory
+
+    p = Path(a._shot_path(Trajectory(task_id="打开 C:/临时*文件", instruction="x")))
+    assert p.parent == tmp_path
+    assert not (set(p.name) & set('\\/:*?"<>|'))
 
 
 def test_loop_respects_max_steps(screen):

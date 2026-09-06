@@ -1,4 +1,13 @@
-from gui_agent.models import GROUNDING_PROMPT, box_center, parse_box
+import numpy as np
+import pytest
+
+from gui_agent.models import (
+    GROUNDING_PROMPT,
+    LocalQwenVL,
+    OpenAICompatVLM,
+    box_center,
+    parse_box,
+)
 
 
 # --- 解析模型输出 -----------------------------------------------------------
@@ -119,8 +128,6 @@ def test_prompt_handles_instruction_with_braces():
 
 
 def test_encode_jpeg_produces_jpeg_magic_bytes():
-    import numpy as np
-
     from gui_agent.models import encode_jpeg
 
     data = encode_jpeg(np.zeros((20, 20, 3), dtype=np.uint8))
@@ -128,8 +135,6 @@ def test_encode_jpeg_produces_jpeg_magic_bytes():
 
 
 def test_encode_jpeg_quality_affects_size():
-    import numpy as np
-
     from gui_agent.models import encode_jpeg
 
     img = np.random.randint(0, 255, (120, 120, 3), dtype=np.uint8)
@@ -140,3 +145,61 @@ def test_default_model_is_a_qwen_vl():
     from gui_agent.models import DEFAULT_MODEL
 
     assert "Qwen" in DEFAULT_MODEL and "VL" in DEFAULT_MODEL
+
+
+# --- locate 的坐标空间 ------------------------------------------------------
+
+MIN_PIXELS, MAX_PIXELS = 256 * 28 * 28, 1280 * 28 * 28
+
+
+def _stub(cls, reply, **attrs):
+    """不加载模型、不建连接，只装上 locate 用到的那几样。"""
+    obj = cls.__new__(cls)
+    obj.ask = lambda image, prompt, **kw: reply
+    for k, v in attrs.items():
+        setattr(obj, k, v)
+    return obj
+
+
+def _smart_resize(h, w):
+    from qwen_vl_utils.vision_process import smart_resize
+
+    return smart_resize(h, w, factor=28, min_pixels=MIN_PIXELS, max_pixels=MAX_PIXELS)
+
+
+def test_local_locate_normalizes_in_smart_resize_space():
+    """Qwen 回的坐标在 smart_resize 之后的空间里，不是原图像素。"""
+    h, w = 1080, 1920
+    rh, rw = _smart_resize(h, w)
+    assert (rw, rh) != (w, h), "尺寸一样的话这条测试区分不出对错"
+
+    m = _stub(LocalQwenVL, '{"bbox_2d": [0, 0, %d, %d]}' % (rw, rh),
+              min_pixels=MIN_PIXELS, max_pixels=MAX_PIXELS)
+    assert m.locate(np.zeros((h, w, 3), dtype=np.uint8), "整块屏幕") == pytest.approx((0.5, 0.5))
+
+
+def test_api_locate_defaults_to_image_size():
+    """没说服务端怎么缩放时，按原图尺寸归一化。"""
+    m = _stub(OpenAICompatVLM, '{"bbox_2d": [200, 100, 600, 300]}',
+              min_pixels=None, max_pixels=None)
+    assert m.locate(np.zeros((400, 800, 3), dtype=np.uint8), "中间") == pytest.approx((0.5, 0.5))
+
+
+def test_api_locate_follows_smart_resize_when_configured():
+    """服务端是 Qwen 系列时，构造时给 min/max_pixels 才能对上它的坐标空间。"""
+    h, w = 1080, 1920
+    rh, rw = _smart_resize(h, w)
+    m = _stub(OpenAICompatVLM, '{"bbox_2d": [0, 0, %d, %d]}' % (rw, rh),
+              min_pixels=MIN_PIXELS, max_pixels=MAX_PIXELS)
+    assert m.locate(np.zeros((h, w, 3), dtype=np.uint8), "整块屏幕") == pytest.approx((0.5, 0.5))
+
+
+def test_locate_returns_none_when_model_finds_nothing():
+    m = _stub(OpenAICompatVLM, "屏幕上没有这个元素", min_pixels=None, max_pixels=None)
+    assert m.locate(np.zeros((10, 10, 3), dtype=np.uint8), "不存在的按钮") is None
+
+
+def test_locate_clamps_out_of_range_box():
+    m = _stub(OpenAICompatVLM, '{"bbox_2d": [-50, -50, 5000, 5000]}',
+              min_pixels=None, max_pixels=None)
+    assert m.locate(np.zeros((100, 100, 3), dtype=np.uint8), "x") == (1.0, 1.0)

@@ -93,6 +93,16 @@ def test_lock_screen_hotkeys_blocked(ctrl):
     assert not ctrl.execute(Action("hotkey", text="Win+L")).ok
 
 
+@pytest.mark.parametrize("combo", [
+    "alt+ctrl+delete", "delete+ctrl+alt",  # 模型不保证按这个顺序给
+    "ctrl+alt+del", "Ctrl + Alt + Del",    # del 归一成 delete
+    "l+win", "meta+l", "SUPER+L",          # meta/super 归一成 win
+])
+def test_lock_screen_blocked_regardless_of_order_and_spelling(ctrl, combo):
+    assert not ctrl.execute(Action("hotkey", text=combo)).ok
+    assert ctrl.backend.calls == []
+
+
 def test_alt_f4_allowed(ctrl):
     """大纲第 4 周的基础任务里有「关闭应用」，不能把 alt+f4 也禁掉。"""
     assert "alt+f4" not in BLOCKED_HOTKEYS
@@ -106,6 +116,14 @@ def test_destructive_commands_blocked_normal_text_allowed():
     assert not c.execute(Action("type", text="rm -rf /")).ok
     assert c.execute(Action("type", text="format the paragraph")).ok
     assert c.execute(Action("type", text="删除这一行")).ok
+
+
+def test_destructive_command_blocked_on_any_line():
+    """多行输入要逐行看行首，否则前面垫一行就绕过去了。"""
+    c = Controller(backend=RecordingBackend())
+    assert not c.execute(Action("type", text="echo hi\nrm -rf /")).ok
+    assert not c.execute(Action("type", text="dir\nformat c:")).ok
+    assert c.backend.calls == []
 
 
 def test_dry_run_applies_to_explicit_backend():

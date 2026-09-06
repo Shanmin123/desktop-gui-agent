@@ -139,14 +139,15 @@ def resolution(width: int = RECOMMENDED[0], height: int = RECOMMENDED[1]) -> Ite
         yield before
         return
     set_resolution(width, height)
-    actual = captured_size()
-    if actual != (width, height):
-        warnings.warn(
-            f"设定 {width}x{height}，实际截图尺寸 {actual[0]}x{actual[1]}。"
-            f"系统缩放为 {scaling_percent()}%，改成 100% 才能真正跑在设定分辨率上。",
-            stacklevel=2,
-        )
     try:
+        # 核对和告警都放在 try 里，中间出错也要还原，否则用户的分辨率就被改走了
+        actual = captured_size()
+        if actual != (width, height):
+            warnings.warn(
+                f"设定 {width}x{height}，实际截图尺寸 {actual[0]}x{actual[1]}。"
+                f"系统缩放为 {scaling_percent()}%，改成 100% 才能真正跑在设定分辨率上。",
+                stacklevel=2,
+            )
         yield actual
     finally:
         restore()

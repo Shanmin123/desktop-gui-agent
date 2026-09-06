@@ -77,6 +77,17 @@ def test_from_dict_accepts_list_coords_and_extra_keys():
     assert a.point == (0.5, 0.5)
 
 
+def test_empty_text_survives_roundtrip():
+    """清空输入框就是 type ""，空串是有效值，不能当没填给丢掉。"""
+    a = Action("type", text="")
+    assert a.to_dict() == {"type": "type", "text": ""}
+    assert Action.from_dict(a.to_dict()).text == ""
+
+
+def test_empty_thought_still_omitted():
+    assert "thought" not in Action("click", point=(0.5, 0.5)).to_dict()
+
+
 # --- 轨迹 -------------------------------------------------------------------
 
 

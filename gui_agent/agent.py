@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .control import Controller
@@ -149,19 +150,26 @@ def parse_step(
 ) -> Tuple[str, Action]:
     """把模型输出解析成 (thought, Action)。
 
-    element 编号在这里换成归一化坐标，编号不存在时抛 ValueError 由上层记为失败。
-    模型给的坐标超出 0~1 时按 model_size 换算。解析不出动作时返回 call_user。
+    element 编号在这里换成归一化坐标。模型给的坐标超出 0~1 时按 model_size 换算。
+
+    拿不到有效动作一律抛 ValueError，由上层记成失败步。不能返回 call_user 顶替：
+    那是模型主动求助时的正常动作，和解析失败混在一起，日志里会把失败记成成功，
+    第 3 周拿这些轨迹做微调数据就带进了错标。
     """
     data = _extract_json(text)
     if not data or not isinstance(data.get("action"), dict):
-        return (f"模型输出无法解析：{text[:80]}", Action("call_user"))
+        raise ValueError(f"模型输出无法解析：{text[:80]}")
 
     thought = str(data.get("thought", ""))
     raw = dict(data["action"])
 
     eid = raw.pop("element", None)
     if eid is not None:
-        match = next((e for e in state.elements if e.id == int(eid)), None)
+        try:
+            eid = int(eid)
+        except (TypeError, ValueError):
+            raise ValueError(f"元素编号不是整数：{eid!r}") from None
+        match = next((e for e in state.elements if e.id == eid), None)
         if match is None:
             raise ValueError(f"元素编号 {eid} 不在当前屏幕的识别结果里")
         raw["point"] = match.center()
@@ -185,36 +193,49 @@ class Agent:
         vlm,
         max_steps: int = MAX_STEPS,
         repeat_limit: int = REPEAT_LIMIT,
+        shot_dir: Optional[str] = None,
     ) -> None:
         self.perception = perception
         self.controller = controller
         self.vlm = vlm
         self.max_steps = max_steps
         self.repeat_limit = repeat_limit
+        self.shot_dir = shot_dir  # 给了就每步存一张截图，微调样本要有配对的图
+
+    def _shot_path(self, traj: Trajectory) -> Optional[str]:
+        if not self.shot_dir:
+            return None
+        stem = re.sub(r"[^\w.-]", "_", traj.task_id)[:32]  # task_id 来自指令，未必能当文件名
+        return str(Path(self.shot_dir) / f"{stem}_{traj.n_steps:02d}.png")
 
     def run(self, instruction: str, task_id: str = "") -> Trajectory:
         traj = Trajectory(task_id=task_id or instruction[:24], instruction=instruction)
+        last_state = ScreenState(width=0, height=0)
 
         for _ in range(self.max_steps):
-            state, model_img = self.perception.perceive()
-            prompt = build_prompt(instruction, state, traj.steps)
-
-            model_size = None
-            if hasattr(self.vlm, "resized_size"):
-                h, w = model_img.shape[:2]
-                rh, rw = self.vlm.resized_size(h, w)
-                model_size = (rw, rh)
-
             t0 = time.perf_counter()
             try:
+                state, model_img = self.perception.perceive(save_to=self._shot_path(traj))
+                last_state = state
+                prompt = build_prompt(instruction, state, traj.steps)
+
+                model_size = None
+                if hasattr(self.vlm, "resized_size"):
+                    h, w = model_img.shape[:2]
+                    rh, rw = self.vlm.resized_size(h, w)
+                    model_size = (rw, rh)
+
                 thought, action = parse_step(
                     self.vlm.ask(model_img, prompt), state, model_size
                 )
-            except ValueError as e:
+            except Exception as e:
+                # 截图、推理、解析任一环节出错都只废掉这一步，已经跑出来的轨迹要留住
+                msg = f"{type(e).__name__}: {e}"
                 traj.steps.append(
-                    Step(state, Action("call_user", thought=str(e)),
-                         ok=False, error=str(e), elapsed=time.perf_counter() - t0)
+                    Step(last_state, Action("call_user", thought=msg),
+                         ok=False, error=msg, elapsed=time.perf_counter() - t0)
                 )
+                traj.success = False
                 break
 
             action.thought = thought

@@ -161,11 +161,21 @@ class OpenAICompatVLM:
     换服务只要改 base_url 和 model。
     """
 
-    def __init__(self, base_url: str, api_key: str, model: str, timeout: int = 60) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        model: str,
+        timeout: int = 60,
+        min_pixels: Optional[int] = None,
+        max_pixels: Optional[int] = None,
+    ) -> None:
         from openai import OpenAI
 
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         self.model = model
+        self.min_pixels = min_pixels
+        self.max_pixels = max_pixels
 
     def ask(self, image: np.ndarray, prompt: str, max_new_tokens: int = 128) -> str:
         b64 = base64.b64encode(encode_jpeg(image)).decode()
@@ -184,15 +194,32 @@ class OpenAICompatVLM:
         )
         return (resp.choices[0].message.content or "").strip()
 
-    def locate(self, image: np.ndarray, instruction: str) -> Optional[Tuple[float, float]]:
-        """API 侧不知道服务端怎么缩放的，按原图尺寸归一化。
+    def resized_size(self, height: int, width: int) -> Tuple[int, int]:
+        """模型实际看到的尺寸，它输出的坐标就在这个尺寸的像素空间里。
 
-        自己先把图缩到目标尺寸再送，这样这里的假设才成立。
+        默认按原图尺寸算。服务端跑的是 Qwen 系列时，构造时传 min_pixels /
+        max_pixels，这里按同一个 smart_resize 还原它的坐标空间。
+
+        smart_resize 会把边长取整到 28 的倍数，超出像素上限时还会整体缩小。图在
+        上限之内时按原图尺寸归一化只差 1~2%，超出就不止：1920×1080 送进去模型看到
+        的是 1316×728，偏差 30% 以上。
         """
+        if self.min_pixels is None or self.max_pixels is None:
+            return height, width
+
+        from qwen_vl_utils.vision_process import smart_resize
+
+        return smart_resize(
+            height, width, factor=28, min_pixels=self.min_pixels, max_pixels=self.max_pixels
+        )
+
+    def locate(self, image: np.ndarray, instruction: str) -> Optional[Tuple[float, float]]:
+        """给一句话，返回归一化的点击点，找不到返回 None。"""
         raw = self.ask(image, GROUNDING_PROMPT.format(instruction=instruction))
         box = parse_box(raw)
         if box is None:
             return None
         h, w = image.shape[:2]
+        rh, rw = self.resized_size(h, w)
         cx, cy = box_center(box)
-        return min(max(cx / w, 0.0), 1.0), min(max(cy / h, 0.0), 1.0)
+        return min(max(cx / rw, 0.0), 1.0), min(max(cy / rh, 0.0), 1.0)

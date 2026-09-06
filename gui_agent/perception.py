@@ -80,17 +80,25 @@ def resize_for_model(
     return cv2.resize(img, (round(w * s), round(h * s)), interpolation=cv2.INTER_AREA), s
 
 
+def _clamp01(v: float) -> float:
+    return min(1.0, max(0.0, v))
+
+
 def _quad_to_norm_bbox(quad, w: int, h: int) -> Tuple[float, float, float, float]:
-    """OCR 给的是四个角点，转成归一化的外接矩形。"""
+    """OCR 给的是四个角点，转成归一化的外接矩形。
+
+    四个边界各自截到 0~1。只截一侧的话，整个框落在图外时会得到 x1 > x2 这种
+    反过来的框。
+    """
     if w <= 0 or h <= 0:
         raise ValueError(f"图像尺寸非法：{w}x{h}")
     xs = [p[0] for p in quad]
     ys = [p[1] for p in quad]
     return (
-        max(0.0, min(xs) / w),
-        max(0.0, min(ys) / h),
-        min(1.0, max(xs) / w),
-        min(1.0, max(ys) / h),
+        _clamp01(min(xs) / w),
+        _clamp01(min(ys) / h),
+        _clamp01(max(xs) / w),
+        _clamp01(max(ys) / h),
     )
 
 
@@ -221,32 +229,31 @@ def annotate(img: np.ndarray, elements: List[Element], show_text: bool = False) 
 
 def benchmark(n: int = 5, monitor: int = 1) -> dict:
     """实测截图、缩放、OCR 各自的耗时，供第 6 周优化时对照。"""
-    p = Perception(monitor=monitor)
-    img = p.capture()
-    h, w = img.shape[:2]
+    with Perception(monitor=monitor) as p:
+        img = p.capture()
+        h, w = img.shape[:2]
 
-    t0 = time.perf_counter()
-    for _ in range(n):
-        p.capture()
-    cap_ms = (time.perf_counter() - t0) / n * 1000
+        t0 = time.perf_counter()
+        for _ in range(n):
+            p.capture()
+        cap_ms = (time.perf_counter() - t0) / n * 1000
 
-    small, s = resize_for_model(img, p.long_edge, p.max_pixels)
-    t0 = time.perf_counter()
-    for _ in range(n):
-        resize_for_model(img, p.long_edge, p.max_pixels)
-    resize_ms = (time.perf_counter() - t0) / n * 1000
+        small, s = resize_for_model(img, p.long_edge, p.max_pixels)
+        t0 = time.perf_counter()
+        for _ in range(n):
+            resize_for_model(img, p.long_edge, p.max_pixels)
+        resize_ms = (time.perf_counter() - t0) / n * 1000
 
-    p.ocr(small)  # 预热，第一次推理带 CUDA 上下文初始化
+        p.ocr(small)  # 预热，第一次推理带 CUDA 上下文初始化
 
-    t0 = time.perf_counter()
-    small_elems = p.ocr(small)
-    ocr_small_s = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        small_elems = p.ocr(small)
+        ocr_small_s = time.perf_counter() - t0
 
-    t0 = time.perf_counter()
-    full_elems = p.ocr(img)
-    ocr_full_s = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        full_elems = p.ocr(img)
+        ocr_full_s = time.perf_counter() - t0
 
-    p.close()
     return {
         "原始分辨率": f"{w}x{h}",
         "缩放后": f"{small.shape[1]}x{small.shape[0]}",

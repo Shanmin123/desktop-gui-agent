@@ -55,3 +55,49 @@ def test_resolution_warns_when_target_not_reached():
             pass
     warned = any("系统缩放" in str(c.message) for c in caught)
     assert (actual == (1280, 720)) != warned, "达成则不该警告，未达成则必须警告"
+
+
+# --- 还原 -------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_display(monkeypatch):
+    """把三个真正碰显示设置的函数换成记录调用，不动真实屏幕。"""
+    from gui_agent import display
+
+    calls = []
+    monkeypatch.setattr(display, "current_resolution", lambda: (3840, 2160))
+    monkeypatch.setattr(display, "set_resolution", lambda w, h: calls.append(("set", w, h)))
+    monkeypatch.setattr(display, "captured_size", lambda monitor=1: (1280, 720))
+    monkeypatch.setattr(display, "restore", lambda: calls.append("restore"))
+    return display, calls
+
+
+def test_resolution_restores_when_body_raises(fake_display):
+    display, calls = fake_display
+    with pytest.raises(RuntimeError):
+        with display.resolution(1280, 720):
+            raise RuntimeError("任务中途炸了")
+    assert calls == [("set", 1280, 720), "restore"]
+
+
+def test_resolution_restores_when_size_check_fails(fake_display, monkeypatch):
+    """改完分辨率之后、进入 with 之前出错，也必须还原。"""
+    display, calls = fake_display
+
+    def boom(monitor=1):
+        raise OSError("读取截图尺寸失败")
+
+    monkeypatch.setattr(display, "captured_size", boom)
+    with pytest.raises(OSError):
+        with display.resolution(1280, 720):
+            pass
+    assert calls == [("set", 1280, 720), "restore"]
+
+
+def test_resolution_is_a_noop_when_already_at_target(fake_display, monkeypatch):
+    display, calls = fake_display
+    monkeypatch.setattr(display, "current_resolution", lambda: (1280, 720))
+    with display.resolution(1280, 720) as actual:
+        assert actual == (1280, 720)
+    assert calls == []

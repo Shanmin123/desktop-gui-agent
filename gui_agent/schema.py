@@ -161,8 +161,15 @@ class Action:
             raise ValueError(f"scroll 方向应为 {SCROLL_DIRECTIONS}，实际为 {self.direction!r}")
 
     def to_dict(self) -> Dict[str, Any]:
-        """只保留有值的字段，日志和训练数据都更干净。"""
-        return {k: v for k, v in asdict(self).items() if v not in (None, "")}
+        """只保留有值的字段，日志和训练数据都更干净。
+
+        text 允许是空串（清空输入框就是 type ""），所以只丢 None，
+        另外单独丢掉空的 thought，否则 to_dict 出来的记录读不回 from_dict。
+        """
+        d = {k: v for k, v in asdict(self).items() if v is not None}
+        if not d.get("thought"):
+            d.pop("thought", None)
+        return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Action":

@@ -36,6 +36,8 @@ def main() -> None:
     ap.add_argument("--repeat", type=int, default=1, help="每个任务重复跑几次")
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--tag", default="v1.0")
+    ap.add_argument("--shots", action="store_true",
+                    help="每步存一张截图，轨迹要当第 3 周的微调样本时打开")
     args = ap.parse_args()
 
     tasks = [t for t in basic_tasks() if args.only in (None, t.id)]
@@ -52,7 +54,8 @@ def main() -> None:
     vlm = LocalQwenVL(args.model)
     perception = Perception()
     controller = Controller(backend=PyAutoGUIBackend(), dry_run=not args.live)
-    agent = Agent(perception, controller, vlm, max_steps=args.max_steps)
+    shot_dir = str(ROOT / "logs" / f"shots_{args.tag}") if args.shots else None
+    agent = Agent(perception, controller, vlm, max_steps=args.max_steps, shot_dir=shot_dir)
 
     records, n_ok = [], 0
     for task in tasks:
@@ -65,7 +68,15 @@ def main() -> None:
                 print(f"   setup 失败：{e}")
                 continue
 
-            traj = agent.run(task.instruction, task_id=task.id)
+            try:
+                traj = agent.run(task.instruction, task_id=task.id)
+            except Exception as e:  # 一个任务崩了不该带走整批的结果
+                print(f"   本次运行异常：{type(e).__name__}: {e}")
+                try:
+                    task.teardown()
+                except Exception as te:
+                    print(f"   teardown 失败：{te}")
+                continue
             for i, s in enumerate(traj.steps, 1):
                 print(f"   {i:>2}. {s.action.type:<12} {'ok' if s.ok else s.error}")
 
