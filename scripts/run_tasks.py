@@ -2,8 +2,11 @@
 
 对应大纲第 4 周第 4 项。每个任务跑完后用程序化验收条件判断成败，不靠人工看。
 
-默认 dry-run，只打印每个任务模型想做什么，不动鼠标键盘。dry-run 下验收必然不通过，
+默认 dry-run，模型给的动作只打印不执行，不动鼠标键盘。dry-run 下验收必然不通过，
 因为动作没真的执行，这一轮是用来确认动作是否合理的。确认后加 --live。
+
+注意 dry-run 只管住模型的动作，任务自身的准备和收尾照常执行：会在 logs/scratch/
+下写文件，也会开关记事本（只开关脚本自己启动的那些）。
 
 用法：
     python scripts/run_tasks.py                    # dry-run
@@ -62,16 +65,24 @@ def main() -> None:
         for run in range(args.repeat):
             label = f"{task.id}" + (f" #{run + 1}" if args.repeat > 1 else "")
             print(f"\n── {label}：{task.instruction}")
+            def record_failure(reason: str) -> None:
+                """跑不起来也要留一条记录，否则它从分母里消失，成功率会虚高。"""
+                print(f"   {reason}")
+                records.append({
+                    "task": task.id, "run": run + 1, "passed": False,
+                    "steps": 0, "wall_time": 0.0, "actions": [], "error": reason,
+                })
+
             try:
                 baseline = task.setup() or {}
             except Exception as e:
-                print(f"   setup 失败：{e}")
+                record_failure(f"setup 失败：{type(e).__name__}: {e}")
                 continue
 
             try:
                 traj = agent.run(task.instruction, task_id=task.id)
             except Exception as e:  # 一个任务崩了不该带走整批的结果
-                print(f"   本次运行异常：{type(e).__name__}: {e}")
+                record_failure(f"本次运行异常：{type(e).__name__}: {e}")
                 try:
                     task.teardown()
                 except Exception as te:

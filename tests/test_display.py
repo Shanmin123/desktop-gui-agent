@@ -1,6 +1,15 @@
+import os
+
 import pytest
 
 from gui_agent.display import RECOMMENDED, current_resolution
+
+# 会真的切换屏幕分辨率的测试。默认不跑：普通一次 pytest 不该把用户的屏幕改来改去。
+#   set GUI_AGENT_DISPLAY_TESTS=1 && pytest tests/test_display.py
+needs_real_display = pytest.mark.skipif(
+    not os.environ.get("GUI_AGENT_DISPLAY_TESTS"),
+    reason="会切换真实分辨率，需设 GUI_AGENT_DISPLAY_TESTS=1 才跑",
+)
 
 
 def test_recommended_is_claude_doc_value():
@@ -39,6 +48,7 @@ def test_captured_size_matches_resolution_only_at_100_percent():
         assert captured_size()[0] >= current_resolution()[0]
 
 
+@needs_real_display
 def test_resolution_warns_when_target_not_reached():
     """切换不到目标分辨率时必须发警告，不能静默失败。
 
@@ -69,7 +79,7 @@ def fake_display(monkeypatch):
     monkeypatch.setattr(display, "current_resolution", lambda: (3840, 2160))
     monkeypatch.setattr(display, "set_resolution", lambda w, h: calls.append(("set", w, h)))
     monkeypatch.setattr(display, "captured_size", lambda monitor=1: (1280, 720))
-    monkeypatch.setattr(display, "restore", lambda: calls.append("restore"))
+    monkeypatch.setattr(display, "restore", lambda w=0, h=0: calls.append(("restore", w, h)))
     return display, calls
 
 
@@ -78,7 +88,7 @@ def test_resolution_restores_when_body_raises(fake_display):
     with pytest.raises(RuntimeError):
         with display.resolution(1280, 720):
             raise RuntimeError("任务中途炸了")
-    assert calls == [("set", 1280, 720), "restore"]
+    assert calls == [("set", 1280, 720), ("restore", 3840, 2160)]
 
 
 def test_resolution_restores_when_size_check_fails(fake_display, monkeypatch):
@@ -92,7 +102,34 @@ def test_resolution_restores_when_size_check_fails(fake_display, monkeypatch):
     with pytest.raises(OSError):
         with display.resolution(1280, 720):
             pass
-    assert calls == [("set", 1280, 720), "restore"]
+    assert calls == [("set", 1280, 720), ("restore", 3840, 2160)]
+
+
+def test_restores_entry_resolution_not_registry_default(fake_display, monkeypatch):
+    """必须切回进入时的尺寸。
+
+    restore() 不带参数走的是注册表默认值，而用户当时用的分辨率未必就是默认值，
+    那样「还原」会把屏幕改成第三个尺寸。
+    """
+    display, calls = fake_display
+    monkeypatch.setattr(display, "current_resolution", lambda: (1920, 1080))
+    with display.resolution(1280, 720):
+        pass
+    assert calls == [("set", 1280, 720), ("restore", 1920, 1080)]
+
+
+def test_restore_without_args_falls_back_to_registry_default(monkeypatch):
+    from gui_agent import display
+
+    seen = []
+    monkeypatch.setattr(display, "set_resolution", lambda w, h: seen.append((w, h)))
+    monkeypatch.setattr(display.ctypes, "windll", type("W", (), {
+        "user32": type("U", (), {"ChangeDisplaySettingsW": staticmethod(
+            lambda *a: seen.append("registry"))})()
+    })())
+    display.restore()
+    display.restore(1280, 720)
+    assert seen == ["registry", (1280, 720)]
 
 
 def test_resolution_is_a_noop_when_already_at_target(fake_display, monkeypatch):

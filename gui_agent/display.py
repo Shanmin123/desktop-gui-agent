@@ -120,8 +120,16 @@ def set_resolution(width: int, height: int) -> None:
         raise OSError(f"切换到 {width}x{height} 失败，返回码 {code}")
 
 
-def restore() -> None:
-    """还原到注册表里保存的默认分辨率。"""
+def restore(width: int = 0, height: int = 0) -> None:
+    """还原分辨率。
+
+    给了尺寸就切回该尺寸；不给才退回注册表里的默认值。默认值未必等于进入时的
+    状态——用户当前用的分辨率本来就可能不是默认值，那样「还原」会把屏幕改成
+    另一个尺寸。
+    """
+    if width and height:
+        set_resolution(width, height)
+        return
     ctypes.windll.user32.ChangeDisplaySettingsW(None, 0)
 
 
@@ -150,4 +158,4 @@ def resolution(width: int = RECOMMENDED[0], height: int = RECOMMENDED[1]) -> Ite
             )
         yield actual
     finally:
-        restore()
+        restore(*before)  # 切回进入时的尺寸，不是注册表默认值

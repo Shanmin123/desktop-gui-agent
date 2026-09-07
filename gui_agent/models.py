@@ -55,7 +55,9 @@ def parse_box(text: str) -> Optional[Tuple[float, float, float, float]]:
         m = re.search(r"\[\s*([\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+)\s*\]", text)
     if not m:
         return None
-    nums = [float(v) for v in re.findall(r"-?[\d.]+", m.group(1))]
+    # 逐个匹配完整的数，不能用 [\d.]+ 笼统地抓：那样 "1..2" 会送进 float() 抛异常，
+    # 科学计数法 "1e3" 会被拆成 1 和 3
+    nums = [float(v) for v in re.findall(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", m.group(1))]
     return tuple(nums[:4]) if len(nums) >= 4 else None
 
 

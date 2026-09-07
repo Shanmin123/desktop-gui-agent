@@ -90,8 +90,29 @@ def _scratch() -> Path:
     return SCRATCH
 
 
+# 本模块自己启动的记事本进程，只关这些
+_OWN_NOTEPADS: Set[int] = set()
+
+
+def _open_notepad() -> int:
+    pid = subprocess.Popen(["notepad.exe"]).pid
+    _OWN_NOTEPADS.add(pid)
+    return pid
+
+
 def _close_notepad() -> None:
-    subprocess.run(["taskkill", "/IM", "notepad.exe", "/F"], capture_output=True, text=True)
+    """关掉本模块启动的记事本。
+
+    不用 `taskkill /IM notepad.exe /F`：那会连用户自己开着的、可能有未保存内容的
+    记事本一起强杀。任务准备和收尾都会调到这里，误伤代价太大。
+    """
+    for pid in list(_OWN_NOTEPADS):
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, text=True)
+        _OWN_NOTEPADS.discard(pid)
+
+
+def _notepad_alive(pid: int) -> bool:
+    return str(pid) in pids_of("notepad.exe")
 
 
 def _setup_open_file() -> Dict:
@@ -103,21 +124,26 @@ def _setup_open_file() -> Dict:
 def _setup_type_and_save() -> Dict:
     (_scratch() / "output.txt").unlink(missing_ok=True)
     _close_notepad()
-    subprocess.Popen(["notepad.exe"])
+    _open_notepad()
     return {}
 
 
 def _setup_close_app() -> Dict:
-    subprocess.Popen(["notepad.exe"])
+    pid = _open_notepad()
     import time
 
     time.sleep(1.5)  # 等窗口起来，否则「关闭」无从谈起
-    return {"was_running": process_running("notepad.exe")}
+    return {"pid": pid, "was_running": _notepad_alive(pid)}
 
 
 def _check_close_app(before: Dict) -> bool:
-    """必须确认执行前记事本确实开着，否则「已关闭」没有意义。"""
-    return before.get("was_running", False) and not process_running("notepad.exe")
+    """必须确认执行前那个记事本确实开着，否则「已关闭」没有意义。
+
+    只看我们启动的那个进程：用户自己另开着一个记事本时，按全局进程名判断会让这
+    个任务永远不通过。
+    """
+    pid = before.get("pid")
+    return bool(before.get("was_running")) and pid is not None and not _notepad_alive(pid)
 
 
 def basic_tasks() -> List[Task]:

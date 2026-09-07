@@ -16,7 +16,11 @@ def ctrl():
 def test_norm_to_pixel(ctrl):
     assert ctrl.to_pixel((0.5, 0.5)) == (1920, 1080)
     assert ctrl.to_pixel((0.0, 0.0)) == (0, 0)
-    assert ctrl.to_pixel((1.0, 1.0)) == (3840, 2160)
+
+
+def test_to_pixel_keeps_right_bottom_edge_on_screen(ctrl):
+    """3840 宽的屏幕像素编号到 3839，归一化 1.0 不能算成 3840——那是屏幕外。"""
+    assert ctrl.to_pixel((1.0, 1.0)) == (3839, 2159)
 
 
 def test_click_correct_when_control_and_capture_sizes_differ():
@@ -97,6 +101,8 @@ def test_lock_screen_hotkeys_blocked(ctrl):
     "alt+ctrl+delete", "delete+ctrl+alt",  # 模型不保证按这个顺序给
     "ctrl+alt+del", "Ctrl + Alt + Del",    # del 归一成 delete
     "l+win", "meta+l", "SUPER+L",          # meta/super 归一成 win
+    "winleft+l", "winright+l",             # pyautogui 认这两个键名，一样能锁屏
+    "ctrlleft+altleft+delete",
 ])
 def test_lock_screen_blocked_regardless_of_order_and_spelling(ctrl, combo):
     assert not ctrl.execute(Action("hotkey", text=combo)).ok
@@ -118,12 +124,40 @@ def test_destructive_commands_blocked_normal_text_allowed():
     assert c.execute(Action("type", text="删除这一行")).ok
 
 
-def test_destructive_command_blocked_on_any_line():
-    """多行输入要逐行看行首，否则前面垫一行就绕过去了。"""
+@pytest.mark.parametrize("text", [
+    "echo hi\nrm -rf /",      # 前面垫一行
+    "dir\nformat c:",
+    "echo ok; rm -rf /",      # 分号拼接
+    "echo ok && shutdown -s",
+    "type a.txt | diskpart",
+])
+def test_destructive_command_blocked_after_any_separator(text):
+    """换行和 ; && | 之后都算新命令的开头，只看整段行首会漏。"""
     c = Controller(backend=RecordingBackend())
-    assert not c.execute(Action("type", text="echo hi\nrm -rf /")).ok
-    assert not c.execute(Action("type", text="dir\nformat c:")).ok
+    assert not c.execute(Action("type", text=text)).ok
     assert c.backend.calls == []
+
+
+def test_failsafe_is_not_swallowed():
+    """FAILSAFE 是用户主动急停，被当成普通失败吞掉就等于没有急停。"""
+    import pyautogui
+
+    class Panicking(RecordingBackend):
+        def click(self, *a, **k):
+            raise pyautogui.FailSafeException("鼠标甩到角落了")
+
+    c = Controller(backend=Panicking())
+    with pytest.raises(pyautogui.FailSafeException):
+        c.execute(Action("click", point=(0.5, 0.5)))
+
+
+def test_ordinary_backend_error_still_becomes_a_failed_result():
+    """只有 FAILSAFE 特殊对待，别的异常照旧记成失败步。"""
+    class Broken(RecordingBackend):
+        def click(self, *a, **k):
+            raise RuntimeError("鼠标被占用")
+
+    assert not Controller(backend=Broken()).execute(Action("click", point=(0.5, 0.5))).ok
 
 
 def test_dry_run_applies_to_explicit_backend():

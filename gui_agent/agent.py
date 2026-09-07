@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from .control import Controller
+from .control import Controller, is_failsafe
 from .schema import Action, ScreenState, Step, Trajectory
 
 MAX_STEPS = 15
@@ -77,10 +77,13 @@ def _signature(action: Action) -> tuple:
 
 
 def is_stuck(steps: List[Step], limit: int = REPEAT_LIMIT) -> bool:
-    """末尾连续 limit 步是同一个动作，说明卡住了。
+    """末尾连续 limit 步是同一个动作，就当卡住了。
 
     动作没让界面产生变化时，模型看到的还是同一屏，会一直给同样的动作。实测在
     dry-run 下三步给出了完全相同的点击。
+
+    只看动作、不看屏幕，所以会误伤：同一位置的「下一步」按钮连点三页也算卡住。
+    大纲第 6 周的鲁棒性优化里再把屏幕变化一起纳入判断。
     """
     if len(steps) < limit:
         return False
@@ -165,10 +168,12 @@ def parse_step(
 
     eid = raw.pop("element", None)
     if eid is not None:
-        try:
-            eid = int(eid)
-        except (TypeError, ValueError):
-            raise ValueError(f"元素编号不是整数：{eid!r}") from None
+        # 不能直接 int()：int(1.9) 和 int(True) 都会悄悄变成 1，点到别的控件上
+        if isinstance(eid, bool) or not isinstance(eid, int):
+            try:
+                eid = int(str(eid).strip())
+            except (TypeError, ValueError):
+                raise ValueError(f"元素编号不是整数：{eid!r}") from None
         match = next((e for e in state.elements if e.id == eid), None)
         if match is None:
             raise ValueError(f"元素编号 {eid} 不在当前屏幕的识别结果里")
@@ -180,7 +185,11 @@ def parse_step(
         if raw.get(k) is not None:
             raw[k] = _to_norm(raw[k], model_size)
 
-    return thought, Action.from_dict(raw)
+    try:
+        return thought, Action.from_dict(raw)
+    except TypeError as e:
+        # 缺 type 字段时 from_dict 抛的是 TypeError，统一成 ValueError
+        raise ValueError(f"动作字段不完整：{raw!r}（{e}）") from None
 
 
 class Agent:
@@ -203,10 +212,16 @@ class Agent:
         self.shot_dir = shot_dir  # 给了就每步存一张截图，微调样本要有配对的图
 
     def _shot_path(self, traj: Trajectory) -> Optional[str]:
+        """本步截图存到哪。
+
+        文件名带上这条轨迹的开始时间：同一个任务跑多次（`--repeat`）时，只用
+        任务 id 加步号会让后一次把前一次的图覆盖掉，之前的轨迹就没有配对的图了。
+        """
         if not self.shot_dir:
             return None
         stem = re.sub(r"[^\w.-]", "_", traj.task_id)[:32]  # task_id 来自指令，未必能当文件名
-        return str(Path(self.shot_dir) / f"{stem}_{traj.n_steps:02d}.png")
+        run = f"{int(traj.started_at * 1000) % 10**9:09d}"
+        return str(Path(self.shot_dir) / f"{stem}_{run}_{traj.n_steps:02d}.png")
 
     def run(self, instruction: str, task_id: str = "") -> Trajectory:
         traj = Trajectory(task_id=task_id or instruction[:24], instruction=instruction)
@@ -230,6 +245,8 @@ class Agent:
                 )
             except Exception as e:
                 # 截图、推理、解析任一环节出错都只废掉这一步，已经跑出来的轨迹要留住
+                if is_failsafe(e):
+                    raise
                 msg = f"{type(e).__name__}: {e}"
                 traj.steps.append(
                     Step(last_state, Action("call_user", thought=msg),

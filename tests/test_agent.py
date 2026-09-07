@@ -126,6 +126,24 @@ def test_string_element_id_still_works(screen):
     assert a.point == pytest.approx((0.3, 0.45))
 
 
+@pytest.mark.parametrize("eid", ["1.9", "true"])
+def test_non_integral_element_id_rejected(screen, eid):
+    """int(1.9) 和 int(True) 都会悄悄变成 1，那就点到别的控件上了。"""
+    with pytest.raises(ValueError, match="不是整数"):
+        parse_step('{"action": {"type": "click", "element": %s}}' % eid, screen)
+
+
+def test_empty_action_object_raises_value_error(screen):
+    """action 是空对象时 Action() 抛的是 TypeError，得统一成 ValueError。"""
+    with pytest.raises(ValueError):
+        parse_step('{"action": {}}', screen)
+
+
+def test_action_missing_type_key_raises_value_error(screen):
+    with pytest.raises(ValueError):
+        parse_step('{"action": {"point": [0.5, 0.5]}}', screen)
+
+
 def test_type_and_hotkey_actions(screen):
     _, a = parse_step('{"action": {"type": "type", "text": "打开浏览器"}}', screen)
     assert a.type == "type" and a.text == "打开浏览器"
@@ -291,6 +309,32 @@ def test_shot_dir_saves_one_image_per_step(screen, tmp_path):
         assert s.screen.image_path and Path(s.screen.image_path).exists()
 
 
+def test_repeated_runs_do_not_overwrite_each_others_shots(screen, tmp_path):
+    """同一个任务跑两次，第二次不能把第一次的图盖掉。"""
+    ctrl = Controller(backend=RecordingBackend(), dry_run=True)
+    a = Agent(SavingPerception(screen), ctrl, FakeVLM([]), shot_dir=str(tmp_path))
+    paths = []
+    for _ in range(2):
+        a.vlm = FakeVLM(['{"action": {"type": "wait"}}', '{"action": {"type": "finished"}}'])
+        paths += [s.screen.image_path for s in a.run("x", task_id="same_task").steps]
+    assert len(set(paths)) == 4
+    assert len(list(tmp_path.glob("*.png"))) == 4
+
+
+def test_failsafe_aborts_the_whole_run(screen):
+    """急停要一路传到调用方，不能被循环记成一条失败步然后继续。"""
+    import pyautogui
+
+    class Panicking(RecordingBackend):
+        def click(self, *a, **k):
+            raise pyautogui.FailSafeException("鼠标甩到角落了")
+
+    vlm = FakeVLM(['{"action": {"type": "click", "element": 1}}'])
+    a = Agent(FakePerception(screen), Controller(backend=Panicking()), vlm)
+    with pytest.raises(pyautogui.FailSafeException):
+        a.run("x")
+
+
 def test_shot_path_sanitizes_task_id(screen, tmp_path):
     """task_id 默认取自指令，里面可能有 / : 这类不能当文件名的字符。"""
     a = Agent(FakePerception(screen), Controller(backend=RecordingBackend()),
@@ -338,12 +382,21 @@ def test_describe_covers_all_action_types():
     from run_agent import describe
 
     assert "0.500" in describe(Action("click", point=(0.5, 0.5)))
+    assert "0.500" in describe(Action("left_double", point=(0.5, 0.5)))
+    assert "0.500" in describe(Action("right_single", point=(0.5, 0.5)))
     assert "drag" in describe(Action("drag", point=(0.1, 0.1), point2=(0.9, 0.9)))
     assert "down" in describe(Action("scroll", point=(0.5, 0.5), direction="down"))
     assert "'hello'" in describe(Action("type", text="hello"))
     assert "'ctrl+s'" in describe(Action("hotkey", text="ctrl+s"))
     assert describe(Action("finished")) == "finished"
     assert describe(Action("wait")) == "wait"
+    assert describe(Action("call_user")) == "call_user"
+
+    from gui_agent.schema import ACTION_TYPES
+
+    covered = {"click", "left_double", "right_single", "drag", "scroll",
+               "type", "hotkey", "finished", "wait", "call_user"}
+    assert covered == set(ACTION_TYPES), "有动作类型没被这条测试覆盖"
 
 
 # --- 卡住检测 ---------------------------------------------------------------

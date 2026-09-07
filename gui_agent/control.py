@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import re
+import sys
 import time
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
@@ -24,10 +25,11 @@ from .schema import Action
 # "alt+ctrl+delete" 这些写法都会命中，不必在这里逐一列出。
 BLOCKED_HOTKEYS = frozenset({"ctrl+alt+delete", "win+l"})
 
-# 形似破坏性命令的输入，命中即拒。规则锚定在行首，多行文本逐行检查。
+# 形似破坏性命令的输入，命中即拒。规则锚定在命令开头，换行和 ; && || | & 之后
+# 都算一个新命令的开头，逐段检查。
 #
 # 文本本身判断不出上下文（同一段话打进文档无害、打进命令行危险），这里只挡最
-# 明显的情况，主要的保障是 dry_run 和 FAILSAFE。
+# 明显的情况，也挡不住把命令拆成几次 type 输入。主要的保障是 dry_run 和 FAILSAFE。
 BLOCKED_TEXT = (
     r"^format\s+[a-z]:",       # format c:
     r"^rm\s+-[rf]{1,2}\b",     # rm -rf
@@ -38,7 +40,10 @@ BLOCKED_TEXT = (
     r"^mkfs\b",
 )
 
-# pyautogui 认识的键名和常见写法的对应
+# pyautogui 认识的键名和常见写法的对应。
+#
+# 左右分开的写法（winleft、ctrlright 等）也归到不带方位的那个：pyautogui 认它们，
+# 不归一的话 winleft+l 一样能锁屏，却匹配不上黑名单里的 win+l。
 _KEY_ALIAS = {
     "control": "ctrl",
     "cmd": "win",
@@ -50,6 +55,14 @@ _KEY_ALIAS = {
     "del": "delete",
     "pgup": "pageup",
     "pgdn": "pagedown",
+    "winleft": "win",
+    "winright": "win",
+    "ctrlleft": "ctrl",
+    "ctrlright": "ctrl",
+    "altleft": "alt",
+    "altright": "alt",
+    "shiftleft": "shift",
+    "shiftright": "shift",
 }
 
 
@@ -58,6 +71,25 @@ class ActionResult:
     ok: bool
     error: str = ""
     elapsed: float = 0.0
+
+
+def is_failsafe(e: BaseException) -> bool:
+    """是不是 pyautogui 的 FAILSAFE 中断。
+
+    FAILSAFE 是用户把鼠标甩到屏幕角落主动喊停，属于中断信号而不是一次失败的动作，
+    被 `except Exception` 吞掉就等于没有急停。只查已经导入的模块：没导入过
+    pyautogui，异常就不可能是它抛的，也就不必为此把它导进来。
+    """
+    mod = sys.modules.get("pyautogui")
+    return mod is not None and isinstance(e, mod.FailSafeException)
+
+
+def command_segments(text: str) -> List[str]:
+    """把一段输入切成若干「命令开头」，换行和 shell 分隔符都算断点。
+
+    只按行首匹配的话，`echo ok; rm -rf /` 这种拼接写法会整段漏过去。
+    """
+    return [s.strip() for s in re.split(r"[\n\r;&|]+", text) if s.strip()]
 
 
 def normalize_hotkey(text: str) -> List[str]:
@@ -124,14 +156,17 @@ class PyAutoGUIBackend:
             previous = None
 
         pyperclip.copy(text)
-        self._pg.hotkey("ctrl", "v")
-
-        if previous is not None:
-            time.sleep(0.1)  # 等粘贴真正完成，否则还原会把内容抢回去
-            try:
-                pyperclip.copy(previous)
-            except Exception:
-                pass
+        try:
+            self._pg.hotkey("ctrl", "v")
+        finally:
+            # 放 finally：粘贴这一步失败（含 FAILSAFE 急停）也得把剪贴板还回去，
+            # 否则用户原来复制的东西就被我们顶掉了
+            if previous is not None:
+                time.sleep(0.1)  # 等粘贴真正完成，否则还原会把内容抢回去
+                try:
+                    pyperclip.copy(previous)
+                except Exception:
+                    pass
 
     def hotkey(self, keys: Sequence[str]) -> None:
         self._pg.hotkey(*keys)
@@ -201,15 +236,22 @@ class Controller:
         self._blocked_key_sets = frozenset(
             frozenset(normalize_hotkey(h)) for h in blocked_hotkeys
         )
-        self.blocked_text = tuple(re.compile(p, re.MULTILINE) for p in blocked_text)
+        self.blocked_text = tuple(re.compile(p) for p in blocked_text)
         self.history: List[Tuple[Action, ActionResult]] = []
         self.dry_run_log: List[Action] = []  # dry_run 下本该执行的动作
 
     # -- 坐标换算 -----------------------------------------------------------
 
     def to_pixel(self, point) -> Tuple[int, int]:
+        """归一化坐标 -> 可点击的像素坐标。
+
+        右下角要减 1：1920 宽的屏幕像素编号到 1919，归一化 1.0 直接乘出来是 1920，
+        点在屏幕外。
+        """
         w, h = self.backend.size()
-        return round(point[0] * w), round(point[1] * h)
+        x = min(max(round(point[0] * w), 0), w - 1)
+        y = min(max(round(point[1] * h), 0), h - 1)
+        return x, y
 
     # -- 安全检查 -----------------------------------------------------------
 
@@ -221,10 +263,10 @@ class Controller:
             if frozenset(keys) in self._blocked_key_sets:
                 return f"组合键 {'+'.join(keys)} 在禁用名单里"
         if action.type == "type" and action.text:
-            low = action.text.strip().lower()
-            for pat in self.blocked_text:
-                if pat.search(low):
-                    return f"输入内容像是破坏性命令，命中规则 {pat.pattern!r}"
+            for seg in command_segments(action.text.lower()):
+                for pat in self.blocked_text:
+                    if pat.search(seg):
+                        return f"输入内容像是破坏性命令，命中规则 {pat.pattern!r}"
         return None
 
     # -- 执行 ---------------------------------------------------------------
@@ -239,6 +281,8 @@ class Controller:
                 self._dispatch(action)
                 result = ActionResult(True, "", time.perf_counter() - t0)
         except Exception as e:  # 单步失败不该让整条任务崩掉，交给上层决定重试
+            if is_failsafe(e):
+                raise  # 急停要一路往上传，不能记成一次普通失败
             result = ActionResult(False, f"{type(e).__name__}: {e}", time.perf_counter() - t0)
 
         self.history.append((action, result))

@@ -173,10 +173,19 @@ def test_annotate_many_elements():
 
 
 def test_annotate_label_stays_inside_at_top_edge():
-    """框贴着上边缘时，编号不能画到画布外面。"""
+    """框贴着上边缘时，编号要画在画布内，不能被顶到外面去。
+
+    只断言「有非零像素」是不够的：矩形本身就会留下像素，编号一个都没画出来也能过。
+    这里比的是贴边和居中两种情况下编号的像素数，少了就说明被裁掉了。
+    """
     img = np.zeros((200, 200, 3), dtype=np.uint8)
-    out = annotate(img, [Element(id=1, bbox=(0.1, 0.0, 0.3, 0.05))])
-    assert out.any()
+    # 矩形是绿色 (0,200,0)，编号是红色 (0,0,255)，看红色通道就只剩编号
+    top = (annotate(img, [Element(id=8, bbox=(0.1, 0.0, 0.3, 0.05))])[:, :, 2] > 0).sum()
+    middle = (annotate(img, [Element(id=8, bbox=(0.1, 0.5, 0.3, 0.55))])[:, :, 2] > 0).sum()
+
+    assert middle > 0, "编号本来就该画出来"
+    assert top >= middle, "框贴着上边缘时编号被裁到画布外了"
+    assert not img.any(), "不能改到输入图"
 
 
 # --- 图片读写 ---------------------------------------------------------------
@@ -204,3 +213,39 @@ def test_default_limits_match_claude_doc():
     """对应 Claude 文档里较早模型那一档：长边 1568、总像素约 1.15 MP。"""
     assert DEFAULT_LONG_EDGE == 1568
     assert DEFAULT_MAX_PIXELS == 1_150_000
+
+
+# --- benchmark 的资源释放 ---------------------------------------------------
+
+
+def test_benchmark_closes_perception_on_error(monkeypatch):
+    """OCR 中途抛异常也要关掉 mss 句柄，不能漏。"""
+    import gui_agent.perception as P
+
+    closed = []
+
+    class FakePerception:
+        long_edge, max_pixels = DEFAULT_LONG_EDGE, DEFAULT_MAX_PIXELS
+
+        def __init__(self, monitor=1):
+            pass
+
+        def capture(self):
+            return np.zeros((720, 1280, 3), dtype=np.uint8)
+
+        def ocr(self, img):
+            raise RuntimeError("OCR 模型加载失败")
+
+        def close(self):
+            closed.append(True)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.close()
+
+    monkeypatch.setattr(P, "Perception", FakePerception)
+    with pytest.raises(RuntimeError):
+        P.benchmark(n=1)
+    assert closed == [True], "异常路径上没有释放 Perception"

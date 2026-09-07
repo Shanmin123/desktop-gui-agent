@@ -24,10 +24,31 @@ def test_instructions_are_non_empty():
         assert t.instruction.strip()
 
 
-def test_file_tasks_stay_in_scratch():
+def test_file_paths_in_instructions_stay_in_scratch():
+    from gui_agent.tasks import SCRATCH
+
     for t in basic_tasks():
         if "\\" in t.instruction or "/" in t.instruction:
-            assert "scratch" in t.instruction
+            assert str(SCRATCH) in t.instruction
+
+
+def test_setup_only_touches_scratch(tmp_path, monkeypatch):
+    """任务准备阶段实际落盘的位置要在 scratch 里，光看指令字符串说明不了问题。"""
+    import gui_agent.tasks as T
+
+    monkeypatch.setattr(T, "SCRATCH", tmp_path / "scratch")
+    monkeypatch.setattr(T, "_open_notepad", lambda: -1)
+    monkeypatch.setattr(T, "_close_notepad", lambda: None)
+    monkeypatch.setattr(T, "window_titles", lambda: set())
+    monkeypatch.setattr(T, "_notepad_alive", lambda pid: True)
+
+    before = {p for p in tmp_path.rglob("*")}
+    for t in T.basic_tasks():
+        t.setup()
+    written = {p for p in tmp_path.rglob("*") if p.is_file()} - before
+    assert written, "至少 open_file 会写 sample.txt"
+    for p in written:
+        assert (tmp_path / "scratch") in p.parents
 
 
 def test_message_task_is_substituted():
