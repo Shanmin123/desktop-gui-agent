@@ -11,6 +11,7 @@ Qwen2.5-VL 输出的坐标位于它内部 smart_resize 之后的像素空间，�
 from __future__ import annotations
 
 import base64
+import os
 import re
 from typing import Optional, Tuple
 
@@ -25,6 +26,34 @@ GROUNDING_PROMPT = (
     "只返回一个 JSON 对象，格式为 {{\"bbox_2d\": [x1, y1, x2, y2]}}，"
     "坐标为图片中的像素值。不要输出任何其他内容。"
 )
+
+
+def add_backend_args(ap) -> None:
+    """给命令行脚本加上选后端的参数。"""
+    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--load-in-4bit", action="store_true", help="本地加载时用 4bit 量化")
+    ap.add_argument("--api-base", default=None,
+                    help="走 OpenAI 兼容 API，给出 base_url；不给则本地加载")
+    ap.add_argument("--api-key", default=None,
+                    help="API 密钥，默认读环境变量 OPENAI_API_KEY")
+    ap.add_argument("--api-qwen", action="store_true",
+                    help="服务端跑的是 Qwen 系列，坐标按 smart_resize 尺寸归一化")
+
+
+def load_vlm(args):
+    """按命令行参数选后端。
+
+    对应大纲第 3 周第 4 项「支持开源多模态模型的本地部署与 API 调用」。
+    """
+    if not args.api_base:
+        return LocalQwenVL(args.model, load_in_4bit=args.load_in_4bit)
+
+    key = args.api_key or os.environ.get("OPENAI_API_KEY")
+    if not key:
+        raise SystemExit("走 API 需要 --api-key，或设环境变量 OPENAI_API_KEY")
+    px = (256 * 28 * 28, 1280 * 28 * 28) if args.api_qwen else (None, None)
+    return OpenAICompatVLM(base_url=args.api_base, api_key=key, model=args.model,
+                           min_pixels=px[0], max_pixels=px[1])
 
 
 def encode_jpeg(img: np.ndarray, quality: int = 85) -> bytes:

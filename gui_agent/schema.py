@@ -213,6 +213,8 @@ class Trajectory:
     steps: List[Step] = field(default_factory=list)
     success: Optional[bool] = None  # None 表示还没判定
     started_at: float = field(default_factory=time.time)
+    subtasks: List[str] = field(default_factory=list)  # Planning 拆出的子任务
+    reflections: List[str] = field(default_factory=list)  # 每次 Reflecting 的判定
 
     @property
     def n_steps(self) -> int:
@@ -230,6 +232,8 @@ class Trajectory:
             "n_steps": self.n_steps,
             "wall_time": round(self.wall_time, 3),
             "started_at": self.started_at,
+            "subtasks": self.subtasks,
+            "reflections": self.reflections,
             "steps": [
                 {
                     "screen": {

@@ -203,3 +203,75 @@ def test_locate_clamps_out_of_range_box():
     m = _stub(OpenAICompatVLM, '{"bbox_2d": [-50, -50, 5000, 5000]}',
               min_pixels=None, max_pixels=None)
     assert m.locate(np.zeros((100, 100, 3), dtype=np.uint8), "x") == (1.0, 1.0)
+
+
+# --- 后端选择（本地 / API）--------------------------------------------------
+
+
+def _args(**kw):
+    import argparse
+
+    from gui_agent.models import add_backend_args
+
+    ap = argparse.ArgumentParser()
+    add_backend_args(ap)
+    a = ap.parse_args([])
+    for k, v in kw.items():
+        setattr(a, k, v)
+    return a
+
+
+def test_backend_args_cover_both_paths():
+    a = _args()
+    for name in ("model", "load_in_4bit", "api_base", "api_key", "api_qwen"):
+        assert hasattr(a, name)
+    assert a.api_base is None  # 默认本地
+
+
+def test_api_backend_selected_when_base_url_given(monkeypatch):
+    from gui_agent import models
+
+    seen = {}
+    monkeypatch.setattr(models, "OpenAICompatVLM",
+                        lambda **kw: seen.update(kw) or "api")
+    assert models.load_vlm(_args(api_base="http://x/v1", api_key="k")) == "api"
+    assert seen["base_url"] == "http://x/v1" and seen["api_key"] == "k"
+    assert seen["min_pixels"] is None  # 没加 --api-qwen 就按原图尺寸归一化
+
+
+def test_api_qwen_passes_pixel_budget(monkeypatch):
+    from gui_agent import models
+
+    seen = {}
+    monkeypatch.setattr(models, "OpenAICompatVLM", lambda **kw: seen.update(kw))
+    models.load_vlm(_args(api_base="http://x/v1", api_key="k", api_qwen=True))
+    assert seen["min_pixels"] == 256 * 28 * 28 and seen["max_pixels"] == 1280 * 28 * 28
+
+
+def test_api_key_falls_back_to_environment(monkeypatch):
+    from gui_agent import models
+
+    seen = {}
+    monkeypatch.setenv("OPENAI_API_KEY", "from-env")
+    monkeypatch.setattr(models, "OpenAICompatVLM", lambda **kw: seen.update(kw))
+    models.load_vlm(_args(api_base="http://x/v1"))
+    assert seen["api_key"] == "from-env"
+
+
+def test_missing_api_key_exits_with_message(monkeypatch):
+    from gui_agent import models
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(SystemExit, match="OPENAI_API_KEY"):
+        models.load_vlm(_args(api_base="http://x/v1"))
+
+
+def test_local_backend_when_no_base_url(monkeypatch):
+    from gui_agent import models
+
+    seen = {}
+    monkeypatch.setattr(models, "LocalQwenVL",
+                        lambda mid, load_in_4bit=False: seen.update(
+                            model=mid, q=load_in_4bit) or "local")
+    assert models.load_vlm(_args(load_in_4bit=True)) == "local"
+    assert seen["q"] is True and "Qwen" in seen["model"]

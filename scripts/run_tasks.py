@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gui_agent.agent import Agent
 from gui_agent.control import Controller, PyAutoGUIBackend
-from gui_agent.models import DEFAULT_MODEL, LocalQwenVL
+from gui_agent.models import DEFAULT_MODEL, add_backend_args, load_vlm
 from gui_agent.perception import Perception
 from gui_agent.tasks import basic_tasks
 
@@ -37,8 +37,10 @@ def main() -> None:
     ap.add_argument("--only", default=None, help="只跑指定 id 的任务")
     ap.add_argument("--max-steps", type=int, default=12)
     ap.add_argument("--repeat", type=int, default=1, help="每个任务重复跑几次")
-    ap.add_argument("--model", default=DEFAULT_MODEL)
+    add_backend_args(ap)
     ap.add_argument("--tag", default="v1.0")
+    ap.add_argument("--plan", action="store_true",
+                    help="先把任务拆成子任务再逐个执行")
     ap.add_argument("--shots", action="store_true",
                     help="每步存一张截图，轨迹要当第 3 周的微调样本时打开")
     args = ap.parse_args()
@@ -54,11 +56,12 @@ def main() -> None:
         print("dry-run：只打印动作，验收必然不通过。确认动作合理后加 --live。\n")
 
     print(f"加载模型 {args.model} ……")
-    vlm = LocalQwenVL(args.model)
+    vlm = load_vlm(args)
     perception = Perception()
     controller = Controller(backend=PyAutoGUIBackend(), dry_run=not args.live)
     shot_dir = str(ROOT / "logs" / f"shots_{args.tag}") if args.shots else None
-    agent = Agent(perception, controller, vlm, max_steps=args.max_steps, shot_dir=shot_dir)
+    agent = Agent(perception, controller, vlm, max_steps=args.max_steps,
+                  shot_dir=shot_dir, plan=args.plan)
 
     records, n_ok = [], 0
     for task in tasks:

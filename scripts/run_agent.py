@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gui_agent.agent import Agent
 from gui_agent.control import Controller, PyAutoGUIBackend
-from gui_agent.models import DEFAULT_MODEL, LocalQwenVL
+from gui_agent.models import DEFAULT_MODEL, add_backend_args, load_vlm
 from gui_agent.perception import Perception
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,9 +45,10 @@ def main() -> None:
     ap.add_argument("instruction", help="要完成的任务，用一句话描述")
     ap.add_argument("--live", action="store_true", help="真的操作桌面，默认只打印")
     ap.add_argument("--max-steps", type=int, default=15)
-    ap.add_argument("--model", default=DEFAULT_MODEL)
-    ap.add_argument("--load-in-4bit", action="store_true")
+    add_backend_args(ap)
     ap.add_argument("--delay", type=float, default=3.0, help="--live 时开始前的等待秒数")
+    ap.add_argument("--plan", action="store_true",
+                    help="先把任务拆成子任务再逐个执行，每步判一次完成度")
     args = ap.parse_args()
 
     if args.live:
@@ -58,12 +59,13 @@ def main() -> None:
 
     print(f"加载模型 {args.model} ……")
     t0 = time.perf_counter()
-    vlm = LocalQwenVL(args.model, load_in_4bit=args.load_in_4bit)
+    vlm = load_vlm(args)
     print(f"  耗时 {time.perf_counter() - t0:.1f}s\n")
 
     perception = Perception()
     controller = Controller(backend=PyAutoGUIBackend(), dry_run=not args.live)
-    agent = Agent(perception, controller, vlm, max_steps=args.max_steps)
+    agent = Agent(perception, controller, vlm, max_steps=args.max_steps,
+                  plan=args.plan)
 
     print(f"任务：{args.instruction}\n")
     traj = agent.run(args.instruction)

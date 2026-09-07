@@ -21,6 +21,7 @@ from typing import List, Optional, Tuple
 
 from .chain import TEMPLATE, build_chain
 from .control import Controller, is_failsafe
+from .planner import REFORMULATE, RETRY, SUCCESS, Planner, acting_instruction
 from .schema import Action, ScreenState, Step, Trajectory
 
 MAX_STEPS = 15
@@ -184,6 +185,9 @@ class Agent:
         max_steps: int = MAX_STEPS,
         repeat_limit: int = REPEAT_LIMIT,
         shot_dir: Optional[str] = None,
+        plan: bool = False,
+        reflect_every: int = 1,
+        max_replans: int = 2,
     ) -> None:
         self.perception = perception
         self.controller = controller
@@ -191,6 +195,11 @@ class Agent:
         self.max_steps = max_steps
         self.repeat_limit = repeat_limit
         self.shot_dir = shot_dir  # 给了就每步存一张截图，微调样本要有配对的图
+        # 先把任务拆成子任务再逐个执行。默认关：v1.0 的基线是在单步循环上测的，
+        # 默认打开会让基线描述的不再是默认配置。规划的效果单独作为一组对照来测。
+        self.plan = plan
+        self.reflect_every = reflect_every  # 每几步判一次当前子任务的状态
+        self.max_replans = max_replans      # 重新拆解的次数上限，防止来回打转
         self._chain = None
         self._chain_vlm = None
 
@@ -229,14 +238,24 @@ class Agent:
     def run(self, instruction: str, task_id: str = "") -> Trajectory:
         traj = Trajectory(task_id=task_id or instruction[:24], instruction=instruction)
         last_state = ScreenState(width=0, height=0)
+        planner = Planner(self.vlm) if self.plan else None
+        planned = False  # 第一次感知拿到屏幕后才能拆解
 
         for _ in range(self.max_steps):
             t0 = time.perf_counter()
             try:
                 state, model_img = self.perception.perceive(save_to=self._shot_path(traj))
                 last_state = state
+
+                if planner is not None and not planned:
+                    # 拆不出子任务就退回单步循环，不让规划这一步卡死整条任务
+                    planner.plan(model_img, instruction, state)
+                    planned = True
+                    traj.subtasks = list(planner.subtasks)
+
                 thought, action = self.chain.invoke({
-                    "instruction": instruction,
+                    "instruction": acting_instruction(
+                        instruction, planner.current() if planner else None),
                     "state": state,
                     "steps": traj.steps,
                     "image": model_img,
@@ -266,6 +285,29 @@ class Agent:
             if action.type == "call_user" or not result.ok:
                 traj.success = False
                 break
+
+            # Reflecting：看执行后的屏幕，判断当前子任务完成没有
+            if planner is not None and planner.current() is not None \
+                    and traj.n_steps % self.reflect_every == 0:
+                try:
+                    after, after_img = self.perception.perceive(run_ocr=False)
+                    situation, _ = planner.reflect(after_img, instruction, traj.steps)
+                except Exception as e:
+                    if is_failsafe(e):
+                        raise
+                    situation = RETRY  # 反思失败不该中断任务，当作要重试
+                traj.reflections.append(situation)
+
+                if situation == SUCCESS:
+                    planner.advance()
+                    if planner.done():
+                        traj.success = True
+                        break
+                elif situation == REFORMULATE and planner.replans < self.max_replans:
+                    planner.replans += 1
+                    planner.plan(model_img, instruction, state)
+                    traj.subtasks = list(planner.subtasks)
+
             if is_stuck(traj.steps, self.repeat_limit):
                 traj.steps.append(
                     Step(state, Action("call_user", thought="连续重复同一个动作，界面没有变化"),
