@@ -119,3 +119,49 @@ def test_file_contains(tmp_path):
 def test_task_defaults():
     t = Task(id="x", instruction="y", check=lambda before: True)
     assert t.setup() == {} and t.teardown() is None
+
+
+# --- 跨平台 -----------------------------------------------------------------
+
+
+def test_process_lookup_uses_psutil_not_platform_commands():
+    """进程查询不能用 tasklist / taskkill 这类 Windows 专有命令。"""
+    from pathlib import Path as _P
+
+    src = _P(__file__).resolve().parents[1] / "gui_agent" / "tasks.py"
+    text = src.read_text(encoding="utf-8")
+    for cmd in ('"tasklist"', '"taskkill"'):
+        assert cmd not in text, f"{cmd} 是 Windows 专有的"
+    assert "import psutil" in text
+
+
+def test_editor_and_browsers_are_chosen_per_platform():
+    import gui_agent.tasks as T
+
+    assert T.EDITOR and T.BROWSERS
+    assert isinstance(T.EDITOR, tuple) and isinstance(T.BROWSERS, tuple)
+
+
+def test_window_titles_returns_empty_set_when_unavailable(monkeypatch):
+    """pygetwindow 在 Linux 上不可用，取不到标题时返回空集合，
+    验收比对的是新增标题，空集合不会误判为通过。"""
+    import builtins
+
+    import gui_agent.tasks as T
+
+    real = builtins.__import__
+
+    def boom(name, *a, **kw):
+        if name == "pygetwindow":
+            raise ImportError("Linux 不支持")
+        return real(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", boom)
+    assert T.window_titles() == set()
+    assert not T.new_title_contains(set(), "python")
+
+
+def test_notepad_alive_is_false_for_a_dead_pid():
+    import gui_agent.tasks as T
+
+    assert T._notepad_alive(999_999_999) is False

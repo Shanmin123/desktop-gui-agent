@@ -138,3 +138,41 @@ def test_resolution_is_a_noop_when_already_at_target(fake_display, monkeypatch):
     with display.resolution(1280, 720) as actual:
         assert actual == (1280, 720)
     assert calls == []
+
+
+# --- 跨平台 -----------------------------------------------------------------
+
+
+def test_windows_only_calls_raise_a_clear_message(monkeypatch):
+    """大纲技术栈要求支持 Windows / macOS / Linux。切换分辨率是平台相关的，
+    在别的平台上要给出能读懂的原因，而不是 AttributeError。"""
+    from gui_agent import display
+
+    monkeypatch.setattr(display, "IS_WINDOWS", False)
+    for fn in (lambda: display.set_resolution(1280, 720), lambda: display.restore()):
+        with pytest.raises(NotImplementedError, match="Windows"):
+            fn()
+
+
+def test_current_resolution_falls_back_to_mss_off_windows(monkeypatch):
+    from gui_agent import display
+
+    monkeypatch.setattr(display, "IS_WINDOWS", False)
+    monkeypatch.setattr(display, "captured_size", lambda monitor=1: (1920, 1080))
+    assert display.current_resolution() == (1920, 1080)
+
+
+def test_scaling_is_one_hundred_off_windows(monkeypatch):
+    from gui_agent import display
+
+    monkeypatch.setattr(display, "IS_WINDOWS", False)
+    assert display.scaling_percent() == 100
+
+
+def test_dpi_call_is_a_noop_off_windows(monkeypatch):
+    """非 Windows 上不能去碰 windll。"""
+    from gui_agent import display
+
+    monkeypatch.setattr(display, "IS_WINDOWS", False)
+    monkeypatch.delattr(display.ctypes, "windll", raising=False)
+    display._ensure_dpi_aware()  # 不该抛

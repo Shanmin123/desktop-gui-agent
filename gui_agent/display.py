@@ -1,6 +1,14 @@
 """临时切换屏幕分辨率。
 
-Claude Computer Use 文档推荐桌面分辨率取 1024×768 或 1280×720。
+大纲没有规定运行分辨率，只要求「支持多分辨率适配」（第 2 周第 1 项）和第 7 周
+「分析不同分辨率下的表现差异」。适配由 perception.scale_factor 负责，本模块提供
+切换能力，供第 7 周做跨分辨率对比。
+
+RECOMMENDED 取 Claude Computer Use 文档推荐的 1280×720（另一档是 1024×768）。
+
+切换分辨率用的是 Windows 的显示设置 API，只在 Windows 上可用；感知（mss）和
+控制（pyautogui）本身跨平台。别的平台上 current_resolution 退回问 mss，
+set_resolution / restore 抛 NotImplementedError。
 
 系统缩放决定了实际能截到多大。缩放不是 100% 时，Windows 按缩放比例建一个更大的
 虚拟桌面：175% 下把分辨率设成 1280×720，截图拿到的是 2240×1260，仍然超出模型输入
@@ -14,6 +22,7 @@ Claude Computer Use 文档推荐桌面分辨率取 1024×768 或 1280×720。
 from __future__ import annotations
 
 import ctypes
+import sys
 import warnings
 from contextlib import contextmanager
 from ctypes import wintypes
@@ -62,7 +71,19 @@ class _DEVMODE(ctypes.Structure):
     ]
 
 
+IS_WINDOWS = sys.platform == "win32"
+
+
+def _require_windows(what: str) -> None:
+    if not IS_WINDOWS:
+        raise NotImplementedError(
+            f"{what}用的是 Windows 的显示设置 API，本机是 {sys.platform}。"
+            "感知和控制模块本身跨平台，只有切换分辨率这一步依赖平台。"
+        )
+
+
 def _current() -> _DEVMODE:
+    _require_windows("读取显示设置")
     dm = _DEVMODE()
     dm.dmSize = ctypes.sizeof(_DEVMODE)
     if not ctypes.windll.user32.EnumDisplaySettingsW(None, _ENUM_CURRENT_SETTINGS, ctypes.byref(dm)):
@@ -71,17 +92,22 @@ def _current() -> _DEVMODE:
 
 
 def current_resolution() -> Tuple[int, int]:
+    """当前分辨率。非 Windows 上退回问 mss，拿截图实际尺寸。"""
+    if not IS_WINDOWS:
+        return captured_size()
     dm = _current()
     return int(dm.dmPelsWidth), int(dm.dmPelsHeight)
 
 
 def _ensure_dpi_aware() -> None:
-    """声明本进程 DPI 感知。
+    """声明本进程 DPI 感知。仅 Windows 需要，别的平台不做事。
 
     不声明的话，系统 API 返回的是按缩放比例虚拟化过的尺寸，和实际截到的图对不上。
     pyautogui 导入时会自己声明，于是同一份代码会因为导入顺序给出不同答案，这里显式
     声明一次消除这个不确定性。
     """
+    if not IS_WINDOWS:
+        return
     try:
         # -4 = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
         ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
@@ -93,7 +119,9 @@ def _ensure_dpi_aware() -> None:
 
 
 def scaling_percent() -> int:
-    """当前系统缩放比例，100 表示无缩放。"""
+    """当前系统缩放比例，100 表示无缩放。非 Windows 上按 100 处理。"""
+    if not IS_WINDOWS:
+        return 100
     return round(_current().dmLogPixels / 96 * 100)
 
 
@@ -112,6 +140,7 @@ def captured_size(monitor: int = 1) -> Tuple[int, int]:
 
 
 def set_resolution(width: int, height: int) -> None:
+    _require_windows("切换分辨率")
     dm = _current()
     dm.dmPelsWidth, dm.dmPelsHeight = width, height
     dm.dmFields = _DM_PELSWIDTH | _DM_PELSHEIGHT
@@ -130,6 +159,7 @@ def restore(width: int = 0, height: int = 0) -> None:
     if width and height:
         set_resolution(width, height)
         return
+    _require_windows("还原分辨率")
     ctypes.windll.user32.ChangeDisplaySettingsW(None, 0)
 
 

@@ -13,28 +13,45 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Set
 
+import psutil
+
 SCRATCH = Path(__file__).resolve().parents[1] / "logs" / "scratch"
-BROWSERS = ("msedge.exe", "chrome.exe", "firefox.exe")
+
+# 进程名按平台不同。大纲技术栈要求支持 Windows / macOS / Linux，进程查询和
+# 结束都走 psutil，不用 tasklist / taskkill 这类 Windows 专有命令。
+if sys.platform == "win32":
+    BROWSERS = ("msedge.exe", "chrome.exe", "firefox.exe")
+    EDITOR = ("notepad.exe",)
+    EDITOR_NAME = "notepad.exe"
+elif sys.platform == "darwin":
+    BROWSERS = ("Safari", "Google Chrome", "firefox")
+    EDITOR = ("open", "-a", "TextEdit")
+    EDITOR_NAME = "TextEdit"
+else:
+    BROWSERS = ("chrome", "chromium", "firefox")
+    EDITOR = ("gedit",)
+    EDITOR_NAME = "gedit"
 
 
 # --- 状态探针 ---------------------------------------------------------------
 
 
 def pids_of(name: str) -> Set[str]:
-    """指定进程名当前的所有 PID。"""
-    out = subprocess.run(
-        ["tasklist", "/FI", f"IMAGENAME eq {name}", "/NH", "/FO", "CSV"],
-        capture_output=True, text=True, errors="replace",
-    ).stdout
+    """指定进程名当前的所有 PID。名字不区分大小写。"""
+    want = name.lower()
     pids = set()
-    for line in out.splitlines():
-        parts = [p.strip('"') for p in line.split('","')]
-        if len(parts) > 1 and parts[0].lower() == name.lower():
-            pids.add(parts[1])
+    for proc in psutil.process_iter(["name"]):
+        try:
+            got = (proc.info["name"] or "").lower()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        if got == want:
+            pids.add(str(proc.pid))
     return pids
 
 
@@ -47,9 +64,17 @@ def browser_pids() -> Set[str]:
 
 
 def window_titles() -> Set[str]:
-    import pygetwindow as gw
+    """当前所有窗口标题。
 
-    return {t for t in gw.getAllTitles() if t}
+    pygetwindow 只在 Windows 上完整可用，macOS 部分可用，Linux 不支持。取不到时
+    返回空集合：依赖它的验收条件比对的是「新增的标题」，空集合下不会误判为通过。
+    """
+    try:
+        import pygetwindow as gw
+
+        return {t for t in gw.getAllTitles() if t}
+    except Exception:  # 各平台抛的异常类型不一，统一按取不到处理
+        return set()
 
 
 def new_title_contains(before: Set[str], keyword: str) -> bool:
@@ -95,24 +120,39 @@ _OWN_NOTEPADS: Set[int] = set()
 
 
 def _open_notepad() -> int:
-    pid = subprocess.Popen(["notepad.exe"]).pid
+    pid = subprocess.Popen(list(EDITOR)).pid
     _OWN_NOTEPADS.add(pid)
     return pid
 
 
 def _close_notepad() -> None:
-    """关掉本模块启动的记事本。
+    """关掉本模块启动的文本编辑器。
 
-    不用 `taskkill /IM notepad.exe /F`：那会连用户自己开着的、可能有未保存内容的
-    记事本一起强杀。任务准备和收尾都会调到这里，误伤代价太大。
+    只按 PID 关自己启动的那些：按进程名一律结束会连用户开着的、可能有未保存内容的
+    窗口一起杀掉。任务准备和收尾都会调到这里，误伤代价太大。
     """
     for pid in list(_OWN_NOTEPADS):
-        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, text=True)
+        try:
+            proc = psutil.Process(pid)
+            proc.terminate()
+            proc.wait(timeout=3)
+        except psutil.TimeoutExpired:
+            try:
+                proc.kill()
+            except psutil.Error:
+                pass
+        except psutil.Error:
+            pass  # 已经退出了
         _OWN_NOTEPADS.discard(pid)
 
 
 def _notepad_alive(pid: int) -> bool:
-    return str(pid) in pids_of("notepad.exe")
+    try:
+        proc = psutil.Process(pid)
+        # 退出后没被回收的僵尸进程还查得到，不算还开着
+        return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+    except psutil.Error:
+        return False
 
 
 def _setup_open_file() -> Dict:

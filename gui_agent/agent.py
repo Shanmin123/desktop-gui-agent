@@ -290,7 +290,7 @@ class Agent:
             if planner is not None and planner.current() is not None \
                     and traj.n_steps % self.reflect_every == 0:
                 try:
-                    after, after_img = self.perception.perceive(run_ocr=False)
+                    _, after_img = self.perception.perceive(run_ocr=False)
                     situation, _ = planner.reflect(after_img, instruction, traj.steps)
                 except Exception as e:
                     if is_failsafe(e):
@@ -299,14 +299,24 @@ class Agent:
                 traj.reflections.append(situation)
 
                 if situation == SUCCESS:
+                    # 只推进子任务，不据此判定整条任务成功。实测反思会连续给出
+                    # sub_task_success 而程序验收判定失败，照它退出等于提前终止。
+                    # 子任务走完后 current() 返回 None，退回按整体任务继续，
+                    # 由模型自己给 finished 或走到步数上限。
                     planner.advance()
-                    if planner.done():
-                        traj.success = True
-                        break
                 elif situation == REFORMULATE and planner.replans < self.max_replans:
                     planner.replans += 1
-                    planner.plan(model_img, instruction, state)
-                    traj.subtasks = list(planner.subtasks)
+                    try:
+                        # 按执行后的屏幕重拆。need_reformulate 的意思就是「看到现在
+                        # 的情况，原计划走不通」，拿动作执行前的屏幕重拆没有意义。
+                        # 这里要带 OCR：拆解的提示词里有元素清单。
+                        fresh, fresh_img = self.perception.perceive()
+                        planner.plan(fresh_img, instruction, fresh)
+                        traj.subtasks = list(planner.subtasks)
+                    except Exception as e:
+                        if is_failsafe(e):
+                            raise
+                        # 重拆失败就保持原计划往下走，不该废掉整条轨迹
 
             if is_stuck(traj.steps, self.repeat_limit):
                 traj.steps.append(

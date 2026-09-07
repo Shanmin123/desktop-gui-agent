@@ -30,19 +30,25 @@ MAX_SUBTASKS = 8
 SUCCESS, RETRY, REFORMULATE = "sub_task_success", "need_retry", "need_reformulate"
 SITUATIONS = (SUCCESS, RETRY, REFORMULATE)
 
+# 例子必须写明是另一个任务的。实测直接给一个裸数组当格式示例时，模型会把示例
+# 原样抄回来：五个任务里四个都回了示例里那两条，包括「关闭记事本」。
+# ScreenAgent 的提示词也是这么区分的（先说「我的任务是搜索麦田怪圈」再给拆解）。
 PLAN_TEMPLATE = PromptTemplate.from_template(
-    """你在操作一台 Windows 电脑。把下面的任务拆成几个按顺序执行的子任务。
+    """你在操作一台 Windows 电脑，要把用户的任务拆成几个按顺序执行的子任务。
+
+先看一个**别的**任务的例子。如果任务是「上网查一下冯诺依曼」，拆解结果是：
+["打开浏览器", "点击地址栏", "输入冯诺依曼并回车", "点开第一条搜索结果"]
+
+下面才是你要拆的任务，和上面的例子无关。
 
 任务：{instruction}
 
 当前屏幕上的文字元素：
 {elements}
 
-只返回一个 JSON 数组，不要有别的内容，每项是一句话：
-["打开开始菜单", "点击文件资源管理器图标"]
-
-拆到能一步步点出来为止，最多 {max_subtasks} 个。子任务描述要具体到界面上的控件，
-不要写「完成任务」这种没有操作对应的句子。"""
+针对上面这个任务，只返回一个 JSON 数组，不要有别的内容，每项一句话，
+最多 {max_subtasks} 个。子任务描述要具体到界面上的控件，不要写「完成任务」
+这种没有对应操作的句子。"""
 )
 
 REFLECT_TEMPLATE = PromptTemplate.from_template(
@@ -54,7 +60,7 @@ REFLECT_TEMPLATE = PromptTemplate.from_template(
 {history}
 
 这是执行后的屏幕。判断当前子任务的状态，只返回一个 JSON 对象：
-{{"situation": "sub_task_success", "advice": "下一步的建议，可省略"}}
+{{"situation": "<下面三个之一>", "advice": "下一步的建议，可省略"}}
 
 situation 三选一：
   sub_task_success   子任务已完成，可以进入下一个
@@ -63,8 +69,40 @@ situation 三选一：
 )
 
 
+# 子任务可能被包在对象里。ScreenAgent 数据集用的是 element，实测 Qwen2.5-VL
+# 回的是 action，两种都收。
+_SUBTASK_KEYS = ("element", "action", "subtask", "step", "description", "task", "content")
+
+
+def _subtask_text(item) -> str:
+    """一项子任务可能是字符串，也可能是包着它的对象。"""
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, (int, float)):
+        return str(item)
+    if isinstance(item, dict):
+        for k in _SUBTASK_KEYS:
+            v = item.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        # 只有一个字符串值时就是它，键叫什么无所谓
+        vals = [v for v in item.values() if isinstance(v, str) and v.strip()]
+        if len(vals) == 1:
+            return vals[0].strip()
+    return ""
+
+
+def _from_list(data, limit: int) -> List[str]:
+    out = [_subtask_text(x) for x in data]
+    return [s for s in out if s][:limit]
+
+
 def parse_plan(text: str, limit: int = MAX_SUBTASKS) -> List[str]:
-    """从模型输出里取出子任务清单，取不到返回空列表。"""
+    """从模型输出里取出子任务清单，取不到返回空列表。
+
+    实测 Qwen2.5-VL 不按提示词要求回字符串数组，回的是
+    `[{"action": "打开开始菜单"}, ...]`，所以对象和字符串两种都要认。
+    """
     from .agent import _extract_json
 
     start = text.find("[")
@@ -80,8 +118,10 @@ def parse_plan(text: str, limit: int = MAX_SUBTASKS) -> List[str]:
                         data = json.loads(text[start:i + 1])
                     except json.JSONDecodeError:
                         break
-                    out = [str(x).strip() for x in data if isinstance(x, (str, int, float))]
-                    return [s for s in out if s][:limit]
+                    got = _from_list(data, limit)
+                    if got:
+                        return got
+                    break
         start = text.find("[", start + 1)
 
     # 有的模型会包一层对象，如 {"plan": [...]}
@@ -89,8 +129,9 @@ def parse_plan(text: str, limit: int = MAX_SUBTASKS) -> List[str]:
     if isinstance(data, dict):
         for v in data.values():
             if isinstance(v, list):
-                out = [str(x).strip() for x in v if isinstance(x, (str, int, float))]
-                return [s for s in out if s][:limit]
+                got = _from_list(v, limit)
+                if got:
+                    return got
     return []
 
 
@@ -127,7 +168,12 @@ class Planner:
     # -- Planning ------------------------------------------------------------
 
     def plan(self, image, instruction: str, state: ScreenState) -> List[str]:
-        """拆解任务。拆不出来返回空列表，上层退回单步循环。"""
+        """拆解任务。
+
+        拆不出来时保留已有计划：重拆返回空列表就把原计划抹掉的话，后面既没有子任务
+        可推进，也不会再反思，等于规划中途消失。首次拆解失败则本来就是空，上层退回
+        单步循环。
+        """
         from .agent import format_elements
 
         prompt = PLAN_TEMPLATE.format(
@@ -135,8 +181,10 @@ class Planner:
             elements=format_elements(state),
             max_subtasks=self.max_subtasks,
         )
-        self.subtasks = parse_plan(self.vlm.ask(image, prompt), self.max_subtasks)
-        self.index = 0
+        got = parse_plan(self.vlm.ask(image, prompt), self.max_subtasks)
+        if got:
+            self.subtasks = got
+            self.index = 0
         return self.subtasks
 
     # -- 当前进度 ------------------------------------------------------------
