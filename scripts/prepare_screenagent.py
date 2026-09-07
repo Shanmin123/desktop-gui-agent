@@ -169,13 +169,16 @@ def main() -> None:
         with zipfile.ZipFile(zipped) as z:
             z.extractall(src)
 
-    all_records, all_skipped, all_stages = [], Counter(), Counter()
+    # 官方已经分好 train / test，测试集整份留作评测，不参与训练也不参与验证。
+    # 合起来重新划分会把测试样本混进训练池，微调后拿它评测出来的数字就是污染的。
+    pool, all_skipped, all_stages = [], Counter(), Counter()
+    held_out = []
     for split in ("train", "test"):
         if not (src / split).is_dir():
             continue
         recs, skipped, stages = build(src, split)
         print(f"{split}: {len(recs)} 条可执行动作")
-        all_records += recs
+        (held_out if split == "test" else pool).extend(recs)
         all_skipped += skipped
         all_stages += stages
 
@@ -187,25 +190,30 @@ def main() -> None:
         print(f"  {str(k):<24} {v}")
 
     print("\n转换后的动作分布:")
-    for k, v in Counter(r["action"]["type"] for r in all_records).most_common():
+    for k, v in Counter(r["action"]["type"] for r in pool + held_out).most_common():
         print(f"  {k:<14} {v}")
 
-    # 按 session 划分，同一次会话不跨训练/验证，避免同一屏的画面两边都出现
-    sessions = sorted({r["session_id"] for r in all_records})
+    # 训练集内部再按 session 切出验证集，同一次会话不跨两边，
+    # 避免同一屏的画面在训练和验证里都出现
+    sessions = sorted({r["session_id"] for r in pool})
     random.shuffle(sessions)
     n_val = max(1, int(len(sessions) * args.val_ratio))
     val_ids = set(sessions[:n_val])
-    train = [r for r in all_records if r["session_id"] not in val_ids]
-    val = [r for r in all_records if r["session_id"] in val_ids]
+    train = [r for r in pool if r["session_id"] not in val_ids]
+    val = [r for r in pool if r["session_id"] in val_ids]
+
+    leaked = {r["session_id"] for r in held_out} & {r["session_id"] for r in pool}
+    if leaked:
+        raise SystemExit(f"训练集和测试集出现了相同的 session：{sorted(leaked)[:5]}")
 
     OUT.mkdir(parents=True, exist_ok=True)
-    for name, recs in [("train", train), ("val", val)]:
+    for name, recs in [("train", train), ("val", val), ("test", held_out)]:
         p = OUT / f"{name}.jsonl"
         p.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in recs),
                      encoding="utf-8")
-        print(f"\n{p}  {len(recs)} 条")
+        print(f"\n{p}  {len(recs)} 条，{len({r['session_id'] for r in recs})} 个 session")
 
-    dump_samples(all_records, OUT / "samples")
+    dump_samples(pool, OUT / "samples")
     print(f"抽样画框已存到 {OUT / 'samples'}，请人工确认标记落在动作描述的位置上。")
 
 
