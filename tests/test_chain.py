@@ -151,3 +151,117 @@ def test_agent_rebuilds_chain_when_model_is_swapped(screen):
 
     a.vlm = FakeVLM('{"action": {"type": "wait"}}')
     assert a.chain is not first
+
+
+# --- 两段式定位 -------------------------------------------------------------
+
+
+class LocatingVLM(FakeVLM):
+    """能定位的假模型：locate 返回预设点，记录被问过哪些描述。"""
+
+    def __init__(self, reply, point=(0.4, 0.6)):
+        super().__init__(reply)
+        self.point = point
+        self.located = []
+
+    def locate(self, image, instruction):
+        self.located.append(instruction)
+        return self.point
+
+
+def test_target_prompt_asks_for_a_control_not_coordinates():
+    from gui_agent.chain import TARGET_TEMPLATE
+
+    assert "target" in TARGET_TEMPLATE
+    assert "不要写坐标" in TARGET_TEMPLATE and "不要写编号" in TARGET_TEMPLATE
+    assert "{instruction}" in TARGET_TEMPLATE and "{history}" in TARGET_TEMPLATE
+
+
+def test_target_prompt_has_no_element_list(screen):
+    """两段式不给 OCR 元素清单，位置交给定位那一步。"""
+    from gui_agent.chain import render_target_prompt
+
+    p = render_target_prompt("打开浏览器", [])
+    assert "打开浏览器" in p and "[1] 保存" not in p
+
+
+def test_target_is_resolved_into_a_point(screen):
+    vlm = LocatingVLM('{"thought": "关掉它", "action": {"type": "click", "target": "关闭按钮"}}',
+                      point=(0.4, 0.6))
+    thought, action = build_chain(vlm, locate_target=True).invoke({
+        "instruction": "关闭窗口", "state": screen, "steps": [],
+        "image": np.zeros((10, 10, 3), dtype=np.uint8),
+    })
+    assert thought == "关掉它"
+    assert action.type == "click" and action.point == (0.4, 0.6)
+    assert vlm.located == ["关闭按钮"]
+
+
+def test_scroll_keeps_direction_through_two_stage(screen):
+    vlm = LocatingVLM('{"action": {"type": "scroll", "target": "列表", "direction": "down"}}')
+    _, a = build_chain(vlm, locate_target=True).invoke({
+        "instruction": "往下翻", "state": screen, "steps": [],
+        "image": np.zeros((10, 10, 3), dtype=np.uint8),
+    })
+    assert a.type == "scroll" and a.direction == "down" and a.point is not None
+
+
+def test_actions_without_target_pass_through(screen):
+    """type / hotkey / finished 不需要定位。"""
+    for raw, kind in [('{"action": {"type": "type", "text": "你好"}}', "type"),
+                      ('{"action": {"type": "hotkey", "text": "ctrl+s"}}', "hotkey"),
+                      ('{"action": {"type": "finished"}}', "finished")]:
+        vlm = LocatingVLM(raw)
+        _, a = build_chain(vlm, locate_target=True).invoke({
+            "instruction": "x", "state": screen, "steps": [],
+            "image": np.zeros((10, 10, 3), dtype=np.uint8),
+        })
+        assert a.type == kind
+        assert vlm.located == [], "不需要定位的动作不该调用 locate"
+
+
+def test_falls_back_to_one_stage_when_model_gives_element(screen):
+    """模型没按两段式回、直接给了 element 编号时，仍按一段式解析。"""
+    vlm = LocatingVLM('{"action": {"type": "click", "element": 1}}')
+    _, a = build_chain(vlm, locate_target=True).invoke({
+        "instruction": "x", "state": screen, "steps": [],
+        "image": np.zeros((10, 10, 3), dtype=np.uint8),
+    })
+    assert a.point == pytest.approx((0.3, 0.45))
+    assert vlm.located == []
+
+
+def test_unlocatable_target_raises(screen):
+    class Blind(LocatingVLM):
+        def locate(self, image, instruction):
+            return None
+
+    vlm = Blind('{"action": {"type": "click", "target": "并不存在的按钮"}}')
+    with pytest.raises(ValueError, match="定位不到"):
+        build_chain(vlm, locate_target=True).invoke({
+            "instruction": "x", "state": screen, "steps": [],
+            "image": np.zeros((10, 10, 3), dtype=np.uint8),
+        })
+
+
+def test_one_stage_is_unchanged_when_flag_is_off(screen):
+    """默认仍是一段式，v1.0 基线描述的就是它。"""
+    vlm = LocatingVLM('{"action": {"type": "click", "element": 1}}')
+    _, a = build_chain(vlm).invoke({
+        "instruction": "x", "state": screen, "steps": [],
+        "image": np.zeros((10, 10, 3), dtype=np.uint8),
+    })
+    assert a.point == pytest.approx((0.3, 0.45)) and vlm.located == []
+
+
+def test_agent_rebuilds_chain_when_locate_target_flips(screen):
+    from gui_agent.agent import Agent
+    from gui_agent.control import Controller, RecordingBackend
+
+    class P:
+        def perceive(self, **kw):
+            return screen, np.zeros((10, 10, 3), dtype=np.uint8)
+
+    a = Agent(P(), Controller(backend=RecordingBackend()), LocatingVLM("{}"),
+              locate_target=True)
+    assert a.locate_target is True

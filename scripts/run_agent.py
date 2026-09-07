@@ -47,6 +47,8 @@ def main() -> None:
     ap.add_argument("--max-steps", type=int, default=15)
     add_backend_args(ap)
     ap.add_argument("--delay", type=float, default=3.0, help="--live 时开始前的等待秒数")
+    ap.add_argument("--locate-target", action="store_true",
+                    help="两段式定位：先让模型说要操作哪个控件，再用定位提示词解析坐标")
     ap.add_argument("--plan", action="store_true",
                     help="先把任务拆成子任务再逐个执行，每步判一次完成度")
     args = ap.parse_args()
@@ -65,7 +67,7 @@ def main() -> None:
     perception = Perception()
     controller = Controller(backend=PyAutoGUIBackend(), dry_run=not args.live)
     agent = Agent(perception, controller, vlm, max_steps=args.max_steps,
-                  plan=args.plan)
+                  plan=args.plan, locate_target=args.locate_target)
 
     print(f"任务：{args.instruction}\n")
     traj = agent.run(args.instruction)

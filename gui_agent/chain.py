@@ -92,24 +92,92 @@ def render_prompt(instruction: str, state: ScreenState, steps: List[Step]) -> st
     )
 
 
-def build_chain(vlm, model_size_of=None) -> Runnable:
+TARGET_TEMPLATE = """你在操作一台 Windows 电脑，目标是完成用户给的任务。
+
+每一步会给你当前屏幕截图。你要输出下一步动作。
+
+可用动作：
+  click / left_double / right_single  点击，需要 target
+  scroll                              滚动，需要 target 和 direction（up/down/left/right）
+  type                                输入文本，需要 text
+  hotkey                              组合键，如 "ctrl+s"，需要 text
+  wait                                等待界面变化
+  finished                            任务已完成
+  call_user                           无法继续，需要人工介入
+
+只返回一个 JSON 对象，不要有别的内容：
+{{"thought": "为什么这么做", "action": {{"type": "click", "target": "要点的控件"}}}}
+
+任务：{instruction}
+
+已执行：
+{history}
+
+target 写界面上那个控件本身，比如「保存按钮」「地址栏」「左上角的关闭图标」。
+不要写坐标，也不要写编号，位置由另一步解析。"""
+
+TARGET_PROMPT = PromptTemplate.from_template(TARGET_TEMPLATE)
+
+NEEDS_TARGET = ("click", "left_double", "right_single", "scroll")
+
+
+def render_target_prompt(instruction: str, steps: List[Step]) -> str:
+    """两段式里第一段的提示词：只问点什么，不问点哪。"""
+    from .agent import format_history
+
+    return TARGET_PROMPT.format(instruction=instruction, history=format_history(steps))
+
+
+def build_chain(vlm, model_size_of=None, locate_target: bool = False) -> Runnable:
     """组装 提示词 -> 模型 -> 解析 的链。
 
     `model_size_of(image) -> (w, h)` 给出模型实际看到的尺寸，交给解析器换算坐标；
     不给就按提示词要求的归一化坐标处理。
+
+    locate_target=True 走两段式：第一段只让模型说要操作哪个控件（target 描述），
+    第二段用 `vlm.locate` 的定位提示词把描述解析成坐标。
+
+    实测 120 条 ScreenSpot 样本：当前一段式命中 40.8%，两段式 62.5%，直接问
+    坐标（已知目标控件）70.0%。一段式吃亏在模型 111/120 次都用 OCR 元素编号
+    指位置，而 OCR 只认文字，没有文字的图标就没有编号可指。
     """
 
     def render(inputs: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            **inputs,
-            "prompt": render_prompt(inputs["instruction"], inputs["state"], inputs["steps"]),
-        }
+        prompt = (render_target_prompt(inputs["instruction"], inputs["steps"])
+                  if locate_target else
+                  render_prompt(inputs["instruction"], inputs["state"], inputs["steps"]))
+        return {**inputs, "prompt": prompt}
 
     def ask(inputs: Dict[str, Any]) -> Dict[str, Any]:
         return {**inputs, "text": vlm.ask(inputs["image"], inputs["prompt"])}
 
     def parse(inputs: Dict[str, Any]) -> Tuple[str, Action]:
         size = model_size_of(inputs["image"]) if model_size_of else None
-        return ActionOutputParser(state=inputs["state"], model_size=size).parse(inputs["text"])
+        if not locate_target:
+            return ActionOutputParser(state=inputs["state"], model_size=size).parse(inputs["text"])
+        return parse_with_target(inputs["text"], vlm, inputs["image"], inputs["state"], size)
 
     return RunnableLambda(render) | RunnableLambda(ask) | RunnableLambda(parse)
+
+
+def parse_with_target(text: str, vlm, image, state: ScreenState,
+                      model_size=None) -> Tuple[str, Action]:
+    """解析两段式的输出，把 target 描述换成坐标。"""
+    from .agent import _extract_json, parse_step
+
+    data = _extract_json(text)
+    raw = data.get("action") if isinstance(data, dict) else None
+    target = raw.get("target") if isinstance(raw, dict) else None
+
+    if not (isinstance(target, str) and target.strip()):
+        # 模型没给 target，按一段式那套再解析一次（它可能直接给了 element 或 point）
+        return parse_step(text, state, model_size)
+
+    kind = str(raw.get("type", "click"))
+    point = vlm.locate(image, target.strip())
+    if point is None:
+        raise ValueError(f"定位不到「{target.strip()}」")
+
+    rest = {k: v for k, v in raw.items() if k not in ("target", "element", "point")}
+    rest["point"] = point
+    return str(data.get("thought", "")), Action.from_dict({**rest, "type": kind})

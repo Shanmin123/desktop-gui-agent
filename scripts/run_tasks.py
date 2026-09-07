@@ -42,6 +42,8 @@ def main() -> None:
     ap.add_argument("--repeat", type=int, default=1, help="每个任务重复跑几次")
     add_backend_args(ap)
     ap.add_argument("--tag", default="v1.0")
+    ap.add_argument("--locate-target", action="store_true",
+                    help="两段式定位：先让模型说要操作哪个控件，再用定位提示词解析坐标")
     ap.add_argument("--plan", action="store_true",
                     help="先把任务拆成子任务再逐个执行")
     ap.add_argument("--shots", action="store_true",
@@ -74,7 +76,7 @@ def main() -> None:
     controller = Controller(backend=PyAutoGUIBackend(), dry_run=not args.live)
     shot_dir = str(ROOT / "logs" / f"shots_{args.tag}") if args.shots else None
     agent = Agent(perception, controller, vlm, max_steps=args.max_steps,
-                  shot_dir=shot_dir, plan=args.plan)
+                  shot_dir=shot_dir, plan=args.plan, locate_target=args.locate_target)
 
     records, n_ok = [], 0
     with screen_ctx as actual:
