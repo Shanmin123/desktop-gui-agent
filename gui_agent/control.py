@@ -63,6 +63,18 @@ _KEY_ALIAS = {
     "altright": "alt",
     "shiftleft": "shift",
     "shiftright": "shift",
+    # X11 keysym 写法，ScreenAgent 数据集用的就是这套（它按 VNC 协议记录）
+    "control_l": "ctrl",
+    "control_r": "ctrl",
+    "shift_l": "shift",
+    "shift_r": "shift",
+    "alt_l": "alt",
+    "alt_r": "alt",
+    "super_l": "win",
+    "super_r": "win",
+    "prior": "pageup",
+    "next": "pagedown",
+    "print": "printscreen",
 }
 
 

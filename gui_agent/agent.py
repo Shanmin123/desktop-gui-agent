@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
+from .chain import TEMPLATE, build_chain
 from .control import Controller, is_failsafe
 from .schema import Action, ScreenState, Step, Trajectory
 
@@ -26,25 +27,8 @@ MAX_STEPS = 15
 MAX_ELEMENTS = 60  # 送进提示词的元素上限，太多会挤占上下文
 REPEAT_LIMIT = 3   # 同一个动作连续这么多次就停，避免在无效操作上空转
 
-SYSTEM_PROMPT = """你在操作一台 Windows 电脑，目标是完成用户给的任务。
-
-每一步会给你当前屏幕截图和屏幕上识别出的文字元素列表。你要输出下一步动作。
-
-可用动作：
-  click / left_double / right_single  点击，指定 element 或 point
-  drag                                拖拽，需要 point 和 point2
-  scroll                              滚动，指定 element 或 point，加 direction（up/down/left/right）
-  type                                输入文本，需要 text
-  hotkey                              组合键，如 "ctrl+s"，需要 text
-  wait                                等待界面变化
-  finished                            任务已完成
-  call_user                           无法继续，需要人工介入
-
-只返回一个 JSON 对象，不要有别的内容：
-{"thought": "为什么这么做", "action": {"type": "click", "element": 12}}
-
-指定位置时优先用 element 编号。列表里没有对应元素时，用 point 给归一化坐标，
-形如 "point": [0.5, 0.5]，取值 0 到 1。"""
+# 提示词模板在 chain.py，用 LangChain 的 PromptTemplate 管理，两边共用一份
+SYSTEM_PROMPT = TEMPLATE.split("\n\n任务：")[0].replace("{{", "{").replace("}}", "}")
 
 
 def format_elements(state: ScreenState, limit: int = MAX_ELEMENTS) -> str:
@@ -92,13 +76,10 @@ def is_stuck(steps: List[Step], limit: int = REPEAT_LIMIT) -> bool:
 
 
 def build_prompt(instruction: str, state: ScreenState, steps: List[Step]) -> str:
-    return (
-        f"{SYSTEM_PROMPT}\n\n"
-        f"任务：{instruction}\n\n"
-        f"已执行：\n{format_history(steps)}\n\n"
-        f"当前屏幕上的文字元素：\n{format_elements(state)}\n\n"
-        f"下一步动作："
-    )
+    """套 chain.py 里的 LangChain 模板生成一步的提示词。"""
+    from .chain import render_prompt
+
+    return render_prompt(instruction, state, steps)
 
 
 def _extract_json(text: str) -> Optional[dict]:
@@ -210,6 +191,28 @@ class Agent:
         self.max_steps = max_steps
         self.repeat_limit = repeat_limit
         self.shot_dir = shot_dir  # 给了就每步存一张截图，微调样本要有配对的图
+        self._chain = None
+        self._chain_vlm = None
+
+    @property
+    def chain(self):
+        """提示词 -> 模型 -> 解析 的 LangChain 链。
+
+        按当前 self.vlm 组装并缓存。不在 __init__ 里定死：换模型时链要跟着换，
+        否则 self.vlm 和链里的模型会指向两个对象。
+        """
+        if self._chain is None or self._chain_vlm is not self.vlm:
+            self._chain = build_chain(self.vlm, model_size_of=self._model_size)
+            self._chain_vlm = self.vlm
+        return self._chain
+
+    def _model_size(self, image):
+        """模型实际看到的尺寸，用来把它回的像素坐标换算成归一化坐标。"""
+        if not hasattr(self.vlm, "resized_size"):
+            return None
+        h, w = image.shape[:2]
+        rh, rw = self.vlm.resized_size(h, w)
+        return rw, rh
 
     def _shot_path(self, traj: Trajectory) -> Optional[str]:
         """本步截图存到哪。
@@ -232,17 +235,12 @@ class Agent:
             try:
                 state, model_img = self.perception.perceive(save_to=self._shot_path(traj))
                 last_state = state
-                prompt = build_prompt(instruction, state, traj.steps)
-
-                model_size = None
-                if hasattr(self.vlm, "resized_size"):
-                    h, w = model_img.shape[:2]
-                    rh, rw = self.vlm.resized_size(h, w)
-                    model_size = (rw, rh)
-
-                thought, action = parse_step(
-                    self.vlm.ask(model_img, prompt), state, model_size
-                )
+                thought, action = self.chain.invoke({
+                    "instruction": instruction,
+                    "state": state,
+                    "steps": traj.steps,
+                    "image": model_img,
+                })
             except Exception as e:
                 # 截图、推理、解析任一环节出错都只废掉这一步，已经跑出来的轨迹要留住
                 if is_failsafe(e):
