@@ -165,3 +165,38 @@ def test_notepad_alive_is_false_for_a_dead_pid():
     import gui_agent.tasks as T
 
     assert T._notepad_alive(999_999_999) is False
+
+
+# --- 验收条件的可靠性 -------------------------------------------------------
+
+
+def test_open_browser_needs_both_a_new_process_and_a_new_window(monkeypatch):
+    """只看进程会误判：浏览器的后台辅助进程不断变化，实测 Agent 只输出了一个
+    call_user、什么都没做，按进程判定却算通过。"""
+    import gui_agent.tasks as T
+
+    t = next(x for x in T.basic_tasks() if x.id == "open_browser")
+    before = {"pids": {"chrome.exe:1"}, "titles": {"记事本"}}
+
+    # 只多了后台进程，没有新窗口 —— 不通过
+    monkeypatch.setattr(T, "browser_pids", lambda: {"chrome.exe:1", "chrome.exe:2"})
+    monkeypatch.setattr(T, "window_titles", lambda: {"记事本"})
+    assert t.check(before) is False
+
+    # 只有新窗口、没有新进程 —— 也不通过
+    monkeypatch.setattr(T, "browser_pids", lambda: {"chrome.exe:1"})
+    monkeypatch.setattr(T, "window_titles", lambda: {"记事本", "新标签页"})
+    assert t.check(before) is False
+
+    # 两个都有 —— 通过
+    monkeypatch.setattr(T, "browser_pids", lambda: {"chrome.exe:1", "chrome.exe:2"})
+    monkeypatch.setattr(T, "window_titles", lambda: {"记事本", "新标签页"})
+    assert t.check(before) is True
+
+
+def test_open_browser_setup_records_both_baselines():
+    import gui_agent.tasks as T
+
+    t = next(x for x in T.basic_tasks() if x.id == "open_browser")
+    snap = t.setup()
+    assert "pids" in snap and "titles" in snap

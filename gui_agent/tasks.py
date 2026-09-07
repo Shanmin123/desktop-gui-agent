@@ -176,6 +176,16 @@ def _setup_close_app() -> Dict:
     return {"pid": pid, "was_running": _notepad_alive(pid)}
 
 
+def _check_open_browser(before: Dict) -> bool:
+    """要求既出现新的浏览器进程，也出现新窗口。
+
+    只看进程会误判：浏览器持续起后台辅助进程（更新程序、渲染器），任何一个新 PID
+    都会让验收通过。实测 Agent 只输出了一个 call_user、一次点击都没有，按进程判定
+    却算通过。真正打开浏览器一定会有新的顶层窗口，两个条件都要满足。
+    """
+    return bool(browser_pids() - before["pids"]) and bool(window_titles() - before["titles"])
+
+
 def _check_close_app(before: Dict) -> bool:
     """必须确认执行前那个记事本确实开着，否则「已关闭」没有意义。
 
@@ -192,9 +202,9 @@ def basic_tasks() -> List[Task]:
         Task(
             id="open_browser",
             instruction="打开浏览器",
-            setup=lambda: {"pids": browser_pids()},
-            check=lambda before: bool(browser_pids() - before["pids"]),
-            note="验收看是否出现新的浏览器进程，不看浏览器是否在运行",
+            setup=lambda: {"pids": browser_pids(), "titles": window_titles()},
+            check=_check_open_browser,
+            note="要新进程加新窗口两个条件：浏览器的后台辅助进程会让只看进程的判定误通过",
         ),
         Task(
             id="search_content",
