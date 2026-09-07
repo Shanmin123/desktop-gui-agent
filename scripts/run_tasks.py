@@ -22,8 +22,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from contextlib import nullcontext
+
 from gui_agent.agent import Agent
 from gui_agent.control import Controller, PyAutoGUIBackend
+from gui_agent.display import resolution as use_resolution
 from gui_agent.models import DEFAULT_MODEL, add_backend_args, load_vlm
 from gui_agent.perception import Perception
 from gui_agent.tasks import basic_tasks
@@ -43,6 +46,8 @@ def main() -> None:
                     help="先把任务拆成子任务再逐个执行")
     ap.add_argument("--shots", action="store_true",
                     help="每步存一张截图，轨迹要当第 3 周的微调样本时打开")
+    ap.add_argument("--resolution", default=None, metavar="WxH",
+                    help="临时切到指定分辨率跑，结束后还原，如 1280x720")
     args = ap.parse_args()
 
     tasks = [t for t in basic_tasks() if args.only in (None, t.id)]
@@ -55,6 +60,14 @@ def main() -> None:
     else:
         print("dry-run：只打印动作，验收必然不通过。确认动作合理后加 --live。\n")
 
+    screen_ctx = nullcontext()
+    if args.resolution:
+        try:
+            rw, rh = (int(v) for v in args.resolution.lower().split("x"))
+        except ValueError:
+            raise SystemExit(f"--resolution 要写成 1280x720 的形式，收到 {args.resolution!r}")
+        screen_ctx = use_resolution(rw, rh)
+
     print(f"加载模型 {args.model} ……")
     vlm = load_vlm(args)
     perception = Perception()
@@ -64,56 +77,59 @@ def main() -> None:
                   shot_dir=shot_dir, plan=args.plan)
 
     records, n_ok = [], 0
-    for task in tasks:
-        for run in range(args.repeat):
-            label = f"{task.id}" + (f" #{run + 1}" if args.repeat > 1 else "")
-            print(f"\n── {label}：{task.instruction}")
-            def record_failure(reason: str) -> None:
-                """跑不起来也要留一条记录，否则它从分母里消失，成功率会虚高。"""
-                print(f"   {reason}")
-                records.append({
-                    "task": task.id, "run": run + 1, "passed": False,
-                    "steps": 0, "wall_time": 0.0, "actions": [], "error": reason,
-                })
+    with screen_ctx as actual:
+        if args.resolution:
+            print(f"分辨率切到 {args.resolution}，实际截图 {actual}，跑完还原\n")
+        for task in tasks:
+            for run in range(args.repeat):
+                label = f"{task.id}" + (f" #{run + 1}" if args.repeat > 1 else "")
+                print(f"\n── {label}：{task.instruction}")
+                def record_failure(reason: str) -> None:
+                    """跑不起来也要留一条记录，否则它从分母里消失，成功率会虚高。"""
+                    print(f"   {reason}")
+                    records.append({
+                        "task": task.id, "run": run + 1, "passed": False,
+                        "steps": 0, "wall_time": 0.0, "actions": [], "error": reason,
+                    })
 
-            try:
-                baseline = task.setup() or {}
-            except Exception as e:
-                record_failure(f"setup 失败：{type(e).__name__}: {e}")
-                continue
+                try:
+                    baseline = task.setup() or {}
+                except Exception as e:
+                    record_failure(f"setup 失败：{type(e).__name__}: {e}")
+                    continue
 
-            try:
-                traj = agent.run(task.instruction, task_id=task.id)
-            except Exception as e:  # 一个任务崩了不该带走整批的结果
-                record_failure(f"本次运行异常：{type(e).__name__}: {e}")
+                try:
+                    traj = agent.run(task.instruction, task_id=task.id)
+                except Exception as e:  # 一个任务崩了不该带走整批的结果
+                    record_failure(f"本次运行异常：{type(e).__name__}: {e}")
+                    try:
+                        task.teardown()
+                    except Exception as te:
+                        print(f"   teardown 失败：{te}")
+                    continue
+                for i, s in enumerate(traj.steps, 1):
+                    print(f"   {i:>2}. {s.action.type:<12} {'ok' if s.ok else s.error}")
+
+                passed = False
+                try:
+                    passed = bool(task.check(baseline))
+                except Exception as e:
+                    print(f"   验收函数出错：{e}")
                 try:
                     task.teardown()
-                except Exception as te:
-                    print(f"   teardown 失败：{te}")
-                continue
-            for i, s in enumerate(traj.steps, 1):
-                print(f"   {i:>2}. {s.action.type:<12} {'ok' if s.ok else s.error}")
+                except Exception as e:
+                    print(f"   teardown 失败：{e}")
 
-            passed = False
-            try:
-                passed = bool(task.check(baseline))
-            except Exception as e:
-                print(f"   验收函数出错：{e}")
-            try:
-                task.teardown()
-            except Exception as e:
-                print(f"   teardown 失败：{e}")
-
-            n_ok += passed
-            print(f"   验收：{'通过' if passed else '不通过'}   {traj.n_steps} 步 "
-                  f"{traj.wall_time:.1f}s")
-            records.append({
-                "task": task.id, "run": run + 1, "passed": passed,
-                "steps": traj.n_steps, "wall_time": round(traj.wall_time, 2),
-                "actions": [s.action.type for s in traj.steps],
-                # 存完整轨迹，失败归因要看模型当时怎么想的
-                "trajectory": json.loads(traj.to_json()),
-            })
+                n_ok += passed
+                print(f"   验收：{'通过' if passed else '不通过'}   {traj.n_steps} 步 "
+                      f"{traj.wall_time:.1f}s")
+                records.append({
+                    "task": task.id, "run": run + 1, "passed": passed,
+                    "steps": traj.n_steps, "wall_time": round(traj.wall_time, 2),
+                    "actions": [s.action.type for s in traj.steps],
+                    # 存完整轨迹，失败归因要看模型当时怎么想的
+                    "trajectory": json.loads(traj.to_json()),
+                })
 
     perception.close()
     total = len(records)
