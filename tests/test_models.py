@@ -271,7 +271,37 @@ def test_local_backend_when_no_base_url(monkeypatch):
 
     seen = {}
     monkeypatch.setattr(models, "LocalQwenVL",
-                        lambda mid, load_in_4bit=False: seen.update(
+                        lambda mid, load_in_4bit=False, adapter=None: seen.update(
                             model=mid, q=load_in_4bit) or "local")
     assert models.load_vlm(_args(load_in_4bit=True)) == "local"
     assert seen["q"] is True and "Qwen" in seen["model"]
+
+
+# --- LoRA 适配器 ------------------------------------------------------------
+
+
+def test_adapter_flag_exists_and_defaults_to_none():
+    a = _args()
+    assert hasattr(a, "adapter") and a.adapter is None
+
+
+def test_adapter_is_passed_to_local_backend(monkeypatch):
+    from gui_agent import models
+
+    seen = {}
+    monkeypatch.setattr(models, "LocalQwenVL",
+                        lambda mid, load_in_4bit=False, adapter=None: seen.update(
+                            model=mid, adapter=adapter))
+    models.load_vlm(_args(adapter="checkpoints/lora"))
+    assert seen["adapter"] == "checkpoints/lora"
+
+
+def test_no_adapter_by_default(monkeypatch):
+    """微调前的基线必须是不挂适配器跑出来的。"""
+    from gui_agent import models
+
+    seen = {}
+    monkeypatch.setattr(models, "LocalQwenVL",
+                        lambda mid, load_in_4bit=False, adapter=None: seen.update(adapter=adapter))
+    models.load_vlm(_args())
+    assert seen["adapter"] is None

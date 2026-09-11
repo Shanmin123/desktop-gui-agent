@@ -38,6 +38,8 @@ def add_backend_args(ap) -> None:
                     help="API 密钥，默认读环境变量 OPENAI_API_KEY")
     ap.add_argument("--api-qwen", action="store_true",
                     help="服务端跑的是 Qwen 系列，坐标按 smart_resize 尺寸归一化")
+    ap.add_argument("--adapter", default=None,
+                    help="LoRA 权重目录，如 checkpoints/lora。给了就在基座上挂适配器")
 
 
 def load_vlm(args):
@@ -46,7 +48,8 @@ def load_vlm(args):
     对应大纲第 3 周第 4 项「支持开源多模态模型的本地部署与 API 调用」。
     """
     if not args.api_base:
-        return LocalQwenVL(args.model, load_in_4bit=args.load_in_4bit)
+        return LocalQwenVL(args.model, load_in_4bit=args.load_in_4bit,
+                           adapter=getattr(args, "adapter", None))
 
     key = args.api_key or os.environ.get("OPENAI_API_KEY")
     if not key:
@@ -113,6 +116,7 @@ class LocalQwenVL:
         load_in_4bit: bool = False,
         min_pixels: int = 256 * 28 * 28,
         max_pixels: int = 1280 * 28 * 28,
+        adapter: Optional[str] = None,
     ) -> None:
         import torch
         from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
@@ -121,6 +125,7 @@ class LocalQwenVL:
         self.model_id = model_id
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
+        self.adapter = adapter
 
         kwargs = {"dtype": torch.bfloat16, "device_map": device}
         if load_in_4bit:
@@ -134,6 +139,11 @@ class LocalQwenVL:
             kwargs.pop("dtype")
 
         self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_id, **kwargs)
+        if adapter:
+            # 挂 LoRA 权重。微调前后必须用同一套评测脚本，差别只在有没有这一步。
+            from peft import PeftModel
+
+            self.model = PeftModel.from_pretrained(self.model, adapter)
         self.model.eval()
         self.processor = AutoProcessor.from_pretrained(
             model_id, min_pixels=min_pixels, max_pixels=max_pixels
