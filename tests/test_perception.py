@@ -249,3 +249,66 @@ def test_benchmark_closes_perception_on_error(monkeypatch):
     with pytest.raises(RuntimeError):
         P.benchmark(n=1)
     assert closed == [True], "异常路径上没有释放 Perception"
+
+
+# --- 屏幕变化检测 -----------------------------------------------------------
+
+
+def _solid(v, shape=(720, 1280, 3)):
+    return np.full(shape, v, dtype=np.uint8)
+
+
+def test_identical_frames_report_no_change():
+    from gui_agent.perception import screen_changed
+
+    img = np.random.randint(0, 255, (720, 1280, 3), dtype=np.uint8)
+    assert screen_changed(img, img.copy()) is False
+
+
+def test_big_change_is_detected():
+    from gui_agent.perception import screen_changed
+
+    assert screen_changed(_solid(10), _solid(200)) is True
+
+
+def test_tiny_local_change_is_ignored():
+    """鼠标指针移动、光标闪烁这类局部小变化不该算界面变了。"""
+    from gui_agent.perception import screen_changed
+
+    a = _solid(120)
+    b = a.copy()
+    b[300:316, 600:612] = 255      # 约一个光标大小的白块
+    assert screen_changed(a, b) is False
+
+
+def test_dialog_sized_change_is_detected():
+    """弹窗这种占屏幕一大块的变化要认出来。"""
+    from gui_agent.perception import screen_changed
+
+    a = _solid(120)
+    b = a.copy()
+    b[200:520, 400:900] = 255
+    assert screen_changed(a, b) is True
+
+
+def test_missing_frame_counts_as_changed():
+    """比不了就当变了，不要误判成卡住。"""
+    from gui_agent.perception import screen_changed
+
+    assert screen_changed(None, _solid(10)) is True
+    assert screen_changed(_solid(10), None) is True
+
+
+def test_threshold_is_adjustable():
+    from gui_agent.perception import screen_changed
+
+    a, b = _solid(100), _solid(103)
+    assert screen_changed(a, b, threshold=10.0) is False
+    assert screen_changed(a, b, threshold=1.0) is True
+
+
+def test_works_on_differently_sized_frames():
+    """切分辨率后前后两帧尺寸不同，也不该崩。"""
+    from gui_agent.perception import screen_changed
+
+    assert screen_changed(_solid(10, (720, 1280, 3)), _solid(200, (1080, 1920, 3))) is True

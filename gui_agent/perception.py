@@ -80,6 +80,31 @@ def resize_for_model(
     return cv2.resize(img, (round(w * s), round(h * s)), interpolation=cv2.INTER_AREA), s
 
 
+# 屏幕变化检测：先缩到这么大再比，够判断「界面动没动」，又不会被鼠标指针
+# 和光标闪烁这类噪声带偏
+DIFF_SIZE = (160, 90)
+DIFF_THRESHOLD = 2.0  # 缩略图上的平均像素差，0~255
+
+
+def screen_changed(before: np.ndarray, after: np.ndarray,
+                   threshold: float = DIFF_THRESHOLD) -> bool:
+    """两帧之间界面有没有变化。
+
+    动作执行后界面没变，通常意味着点空了。这是程序能验证的信号，比让模型自己
+    判断可靠——实测模型的反思 19 次里 18 次报成功，而程序验收只过了 1 个任务。
+
+    缩到 160×90 灰度再比：鼠标指针移动、光标闪烁在这个尺度上会被平均掉，
+    真正的界面变化（弹窗、切换页面、菜单展开）则仍然明显。
+    """
+    if before is None or after is None:
+        return True  # 没法比就当变了，不要误判成卡住
+    a = cv2.cvtColor(cv2.resize(before, DIFF_SIZE, interpolation=cv2.INTER_AREA),
+                     cv2.COLOR_BGR2GRAY).astype(np.float32)
+    b = cv2.cvtColor(cv2.resize(after, DIFF_SIZE, interpolation=cv2.INTER_AREA),
+                     cv2.COLOR_BGR2GRAY).astype(np.float32)
+    return float(np.abs(a - b).mean()) >= threshold
+
+
 def _clamp01(v: float) -> float:
     return min(1.0, max(0.0, v))
 

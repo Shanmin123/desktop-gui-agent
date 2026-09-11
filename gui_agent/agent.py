@@ -21,6 +21,7 @@ from typing import List, Optional, Tuple
 
 from .chain import TEMPLATE, build_chain
 from .control import Controller, is_failsafe
+from .perception import screen_changed
 from .planner import REFORMULATE, RETRY, SUCCESS, Planner, acting_instruction
 from .schema import Action, ScreenState, Step, Trajectory
 
@@ -51,7 +52,13 @@ def format_history(steps: List[Step], limit: int = 5) -> str:
         return "  （这是第一步）"
     out = []
     for i, s in enumerate(steps[-limit:], start=max(1, len(steps) - limit + 1)):
-        status = "成功" if s.ok else f"失败：{s.error}"
+        if not s.ok:
+            status = f"失败：{s.error}"
+        elif s.changed is False:
+            # 把「点了但没反应」明确喂回去，模型才有机会换个目标而不是原地重复
+            status = "执行了，但界面没有变化，很可能没点中"
+        else:
+            status = "成功"
         out.append(f"  第{i}步 {s.action.type} → {status}")
     return "\n".join(out)
 
@@ -62,18 +69,22 @@ def _signature(action: Action) -> tuple:
 
 
 def is_stuck(steps: List[Step], limit: int = REPEAT_LIMIT) -> bool:
-    """末尾连续 limit 步是同一个动作，就当卡住了。
+    """末尾连续 limit 步没有推进，就当卡住了。
 
-    动作没让界面产生变化时，模型看到的还是同一屏，会一直给同样的动作。实测在
-    dry-run 下三步给出了完全相同的点击。
+    有屏幕变化记录时按它判断：连续 limit 步动作相同、且界面一次都没变，才算卡住。
+    只看动作会误伤同一位置的「下一步」按钮——连点三页界面每次都在变，不是卡住。
 
-    只看动作、不看屏幕，所以会误伤：同一位置的「下一步」按钮连点三页也算卡住。
-    大纲第 6 周的鲁棒性优化里再把屏幕变化一起纳入判断。
+    没有变化记录时（未开启检测）退回只看动作是否重复。
     """
     if len(steps) < limit:
         return False
-    sigs = [_signature(s.action) for s in steps[-limit:]]
-    return len(set(sigs)) == 1
+    tail = steps[-limit:]
+    if len(set(_signature(s.action) for s in tail)) != 1:
+        return False
+    marks = [s.changed for s in tail]
+    if all(m is None for m in marks):
+        return True          # 没有变化信息，只能按动作重复判
+    return not any(marks)    # 有任何一步让界面变了，就不算卡住
 
 
 def build_prompt(instruction: str, state: ScreenState, steps: List[Step]) -> str:
@@ -189,6 +200,7 @@ class Agent:
         reflect_every: int = 1,
         max_replans: int = 2,
         locate_target: bool = False,
+        detect_change: bool = True,
     ) -> None:
         self.perception = perception
         self.controller = controller
@@ -204,6 +216,9 @@ class Agent:
         # 两段式定位：先让模型说要操作哪个控件，再用定位提示词解析坐标。
         # 实测在 ScreenSpot 上把命中率从 40.8% 提到 62.5%。
         self.locate_target = locate_target
+        # 每步执行后比一次屏幕，判断动作有没有产生效果。多一次截图（1280x720 下
+        # 25 ms），不跑 OCR，开销可以忽略，所以默认开。
+        self.detect_change = detect_change
         self._chain = None
         self._chain_vlm = None
 
@@ -279,9 +294,22 @@ class Agent:
 
             action.thought = thought
             result = self.controller.execute(action)
+
+            # 错误检测：执行后界面有没有变化。点击落在空白处一样会 ok=True，
+            # 只有比对屏幕才看得出「点了但没点中」。
+            changed = None
+            if self.detect_change and result.ok and not action.is_terminal():
+                try:
+                    _, after_img = self.perception.perceive(run_ocr=False)
+                    changed = screen_changed(model_img, after_img)
+                except Exception as e:
+                    if is_failsafe(e):
+                        raise
+                    changed = None  # 检测本身失败就不做判断，别误判成没变
+
             traj.steps.append(
                 Step(state, action, ok=result.ok, error=result.error,
-                     elapsed=time.perf_counter() - t0)
+                     elapsed=time.perf_counter() - t0, changed=changed)
             )
 
             if action.type == "finished":

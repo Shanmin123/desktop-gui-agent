@@ -252,7 +252,9 @@ def test_perception_failure_keeps_earlier_steps(screen):
     vlm = FakeVLM(['{"action": {"type": "wait"}}', '{"action": {"type": "scroll", '
                    '"point": [0.5, 0.5], "direction": "down"}}'])
     ctrl = Controller(backend=RecordingBackend(), dry_run=True)
-    t = Agent(FlakyPerception(screen), ctrl, vlm).run("x")
+    # 关掉变化检测：它每步多调一次 perceive，会让「第几次调用失败」这件事
+    # 变得和实现细节绑定。这条测的是主感知失败时轨迹保不保得住。
+    t = Agent(FlakyPerception(screen), ctrl, vlm, detect_change=False).run("x")
     assert t.n_steps == 3 and t.steps[0].ok and t.steps[1].ok
     assert not t.steps[2].ok and "屏幕抓取失败" in t.steps[2].error
     assert t.success is False
@@ -488,3 +490,119 @@ def test_agent_passes_model_size(screen):
     t = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm).run("x")
     assert t.steps[0].ok
     assert t.steps[0].action.point == pytest.approx((0.5, 0.5), abs=0.01)
+
+
+# --- 错误检测：动作有没有产生效果 -------------------------------------------
+
+
+class TwoFramePerception:
+    """按脚本依次返回不同的画面，用来造出「界面变了/没变」两种情形。"""
+
+    def __init__(self, state, frames):
+        self.state = state
+        self.frames = list(frames)
+        self.calls = 0
+
+    def perceive(self, **kw):
+        self.calls += 1
+        f = self.frames[min(self.calls - 1, len(self.frames) - 1)]
+        return self.state, f
+
+
+def _frame(value):
+    return np.full((90, 160, 3), value, dtype=np.uint8)
+
+
+def test_unchanged_screen_is_recorded_on_the_step(screen):
+    """点击落在空白处也会 ok=True，只有比对屏幕才看得出没点中。"""
+    vlm = FakeVLM(['{"action": {"type": "click", "element": 1}}',
+                   '{"action": {"type": "finished"}}'])
+    per = TwoFramePerception(screen, [_frame(10), _frame(10)])   # 前后一模一样
+    t = Agent(per, Controller(backend=RecordingBackend(1920, 1080)), vlm).run("x")
+    assert t.steps[0].ok is True and t.steps[0].changed is False
+
+
+def test_changed_screen_is_recorded(screen):
+    vlm = FakeVLM(['{"action": {"type": "click", "element": 1}}',
+                   '{"action": {"type": "finished"}}'])
+    per = TwoFramePerception(screen, [_frame(10), _frame(200)])  # 画面大变
+    t = Agent(per, Controller(backend=RecordingBackend(1920, 1080)), vlm).run("x")
+    assert t.steps[0].changed is True
+
+
+def test_no_change_is_fed_back_into_the_prompt(screen):
+    """没点中要明确告诉模型，它才有机会换个目标而不是原地重复。"""
+    vlm = FakeVLM(['{"action": {"type": "click", "element": 1}}',
+                   '{"action": {"type": "finished"}}'])
+    per = TwoFramePerception(screen, [_frame(10), _frame(10)])
+    Agent(per, Controller(backend=RecordingBackend(1920, 1080)), vlm).run("x")
+    assert "界面没有变化" in vlm.prompts[1]
+
+
+def test_detection_can_be_switched_off(screen):
+    vlm = FakeVLM(['{"action": {"type": "click", "element": 1}}',
+                   '{"action": {"type": "finished"}}'])
+    per = TwoFramePerception(screen, [_frame(10), _frame(10)])
+    t = Agent(per, Controller(backend=RecordingBackend(1920, 1080)), vlm,
+              detect_change=False).run("x")
+    assert t.steps[0].changed is None
+
+
+def test_detection_failure_does_not_kill_the_step(screen):
+    """检测本身出错时不做判断，不能把整步记成失败。"""
+
+    class DetectBoom(TwoFramePerception):
+        def perceive(self, run_ocr=True, **kw):
+            if not run_ocr:            # 只有变化检测那次会传 run_ocr=False
+                raise OSError("截图失败")
+            return super().perceive(**kw)
+
+    vlm = FakeVLM(['{"action": {"type": "click", "element": 1}}',
+                   '{"action": {"type": "finished"}}'])
+    per = DetectBoom(screen, [_frame(10)])
+    t = Agent(per, Controller(backend=RecordingBackend(1920, 1080)), vlm).run("x")
+    assert t.steps[0].ok is True and t.steps[0].changed is None
+    assert t.n_steps == 2 and t.success is True
+
+
+def test_terminal_actions_are_not_checked(screen):
+    """finished / call_user 没有对应的界面操作，不必比屏幕。"""
+    vlm = FakeVLM(['{"action": {"type": "finished"}}'])
+    per = TwoFramePerception(screen, [_frame(10)])
+    t = Agent(per, Controller(backend=RecordingBackend()), vlm).run("x")
+    assert t.steps[0].changed is None and per.calls == 1
+
+
+# --- 卡住判定用屏幕变化 -----------------------------------------------------
+
+
+def test_repeated_action_that_changes_the_screen_is_not_stuck(screen):
+    """同一位置的「下一步」按钮连点三页，界面每次都在变，不是卡住。"""
+    from gui_agent.agent import is_stuck
+
+    steps = [Step(screen, Action("click", point=(0.5, 0.5)), changed=True) for _ in range(3)]
+    assert not is_stuck(steps)
+
+
+def test_repeated_action_without_change_is_stuck(screen):
+    from gui_agent.agent import is_stuck
+
+    steps = [Step(screen, Action("click", point=(0.5, 0.5)), changed=False) for _ in range(3)]
+    assert is_stuck(steps)
+
+
+def test_one_change_among_repeats_is_enough(screen):
+    from gui_agent.agent import is_stuck
+
+    steps = [Step(screen, Action("click", point=(0.5, 0.5)), changed=False),
+             Step(screen, Action("click", point=(0.5, 0.5)), changed=True),
+             Step(screen, Action("click", point=(0.5, 0.5)), changed=False)]
+    assert not is_stuck(steps)
+
+
+def test_without_change_info_falls_back_to_action_repetition(screen):
+    """没开检测时退回只看动作是否重复，行为与之前一致。"""
+    from gui_agent.agent import is_stuck
+
+    steps = [Step(screen, Action("click", point=(0.5, 0.5))) for _ in range(3)]
+    assert is_stuck(steps)

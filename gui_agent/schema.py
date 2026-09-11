@@ -199,6 +199,10 @@ class Step:
     ok: bool = True
     error: str = ""
     elapsed: float = 0.0
+    # 执行后界面有没有变化。None 表示没检测（终止类动作、或未开启检测）。
+    # ok 说的是动作有没有被执行，changed 说的是执行后有没有效果，两回事：
+    # 点击落在空白处一样会 ok=True，但 changed=False。
+    changed: Optional[bool] = None
 
 
 @dataclass
@@ -246,6 +250,7 @@ class Trajectory:
                     "action": s.action.to_dict(),
                     "ok": s.ok,
                     "error": s.error,
+                    "changed": s.changed,
                     "elapsed": round(s.elapsed, 3),
                 }
                 for s in self.steps
