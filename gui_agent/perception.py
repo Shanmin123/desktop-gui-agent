@@ -1,6 +1,10 @@
 """桌面感知：截图、多分辨率适配、OCR、UI 元素识别与边界框绘制。
 
-对应大纲第 2 周第 1、2、4 项。
+对应大纲第 2 周第 1、2、4 项，第 6 周第 3 项。
+
+第 6 周的优化有两条，都默认关着，开关在 Perception 的构造参数上：
+  cache_ocr    屏幕没变就复用上一次的 OCR 结果，省掉重复的一次识别
+  cv_elements  用 OpenCV 补一批图标候选框，让没有文字的控件也有编号可指
 
 多分辨率适配分两层：
 1. 送模型前把截图缩小。缩放系数按 Claude Computer Use 文档给的算法算，取
@@ -15,6 +19,7 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -105,6 +110,75 @@ def screen_changed(before: np.ndarray, after: np.ndarray,
     return float(np.abs(a - b).mean()) >= threshold
 
 
+# -- 非文字控件的候选框（大纲第 6 周第 3 项）---------------------------------
+
+CV_MIN_SIDE = 10        # 像素，比这更小的外接框基本是噪点
+CV_MAX_SIDE_FRAC = 0.12  # 边长超过短边这个比例就不像图标了
+CV_MAX_ELEMENTS = 80
+CV_DEDUP_IOU = 0.3      # 和某个 OCR 框重叠超过这个值，就认定它是文字，不重复收
+
+
+def detect_cv_elements(img: np.ndarray, max_elements: int = CV_MAX_ELEMENTS) -> List[Element]:
+    """用 OpenCV 找图标这类没有文字的控件。
+
+    OCR 只认文字，图标在元素清单里没有编号，模型就指不了它——第 2 周排查命中率
+    低的时候，根因就在这。这里补一批候选框：边缘检测 -> 闭运算把图标的笔画连成
+    一块 -> 取外接矩形 -> 按尺寸和长宽比筛掉分割线、大面板和噪点。
+
+    返回的元素没有文字，按面积从大到小排，坐标同样归一化。
+    """
+    h, w = img.shape[:2]
+    if h < 2 or w < 2:
+        return []
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    edges = cv2.Canny(gray, 50, 150)
+    kernel = np.ones((3, 3), np.uint8)
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    max_side = min(w, h) * CV_MAX_SIDE_FRAC
+    boxes = []
+    for c in contours:
+        x, y, bw, bh = cv2.boundingRect(c)
+        if bw < CV_MIN_SIDE or bh < CV_MIN_SIDE:
+            continue
+        if bw > max_side or bh > max_side:
+            continue
+        if not 0.25 <= bw / bh <= 4.0:  # 太扁太窄的是分割线和滚动条
+            continue
+        boxes.append((bw * bh, (x / w, y / h, (x + bw) / w, (y + bh) / h)))
+
+    boxes.sort(key=lambda b: -b[0])
+    return [
+        Element(id=i, bbox=b, text="", source="cv", confidence=0.0)
+        for i, (_, b) in enumerate(boxes[:max_elements])
+    ]
+
+
+def _iou(a, b) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    iy = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = ix * iy
+    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def merge_elements(ocr_elements: List[Element], cv_elements: List[Element],
+                   iou_threshold: float = CV_DEDUP_IOU) -> List[Element]:
+    """OCR 元素在前，CV 框补在后面，和已有框重叠的丢掉。
+
+    合并后必须重新编号：编号是提示词里模型用来指元素的，要连续且唯一。
+    """
+    out = [replace(e, id=i) for i, e in enumerate(ocr_elements)]
+    for e in cv_elements:
+        if any(_iou(e.bbox, o.bbox) > iou_threshold for o in out):
+            continue
+        out.append(replace(e, id=len(out)))
+    return out
+
+
 def _clamp01(v: float) -> float:
     return min(1.0, max(0.0, v))
 
@@ -140,6 +214,8 @@ class Perception:
         langs: Tuple[str, ...] = ("ch_sim", "en"),
         long_edge: int = DEFAULT_LONG_EDGE,
         max_pixels: int = DEFAULT_MAX_PIXELS,
+        cache_ocr: bool = False,
+        cv_elements: bool = False,
     ) -> None:
         import mss  # 延迟导入，纯函数测试不需要它
 
@@ -148,8 +224,17 @@ class Perception:
         self.langs = list(langs)
         self.long_edge = long_edge
         self.max_pixels = max_pixels
+        # 屏幕没变就复用上一次的 OCR 结果。Agent 每步开头都要感知一次，而点空、
+        # 等待、重试这些步骤前后屏幕是一样的，重跑 OCR 是白花的。
+        self.cache_ocr = cache_ocr
+        # 补一批 OpenCV 的图标候选框，让没有文字的控件也有编号可指。
+        self.cv_elements = cv_elements
         self._sct = mss.mss()
         self._reader = None
+        self._last_img = None
+        self._last_elements: List[Element] = []
+        self.ocr_calls = 0    # 真正跑了几次 OCR
+        self.ocr_skipped = 0  # 命中缓存跳过了几次
 
     # -- 截图 ---------------------------------------------------------------
 
@@ -172,17 +257,20 @@ class Perception:
             self._reader = easyocr.Reader(self.langs, gpu=self.gpu, verbose=False)
         return self._reader
 
-    def ocr(self, img: np.ndarray, min_confidence: float = 0.3) -> List[Element]:
+    def ocr(self, img: np.ndarray, min_confidence: float = 0.3,
+            mag_ratio: float = 1.0) -> List[Element]:
         """在传入的图上跑 OCR，返回归一化坐标的元素列表。
 
         坐标按传入图的尺寸归一化。传原图，缩放图上识别率明显更低。
+
+        mag_ratio 是 easyocr 检测前的放大倍数，调大能多认出小字，代价是变慢。
 
         easyocr 把三通道数组当 RGB 处理，所以先从 BGR 转一次。
         """
         h, w = img.shape[:2]
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         out = []
-        for quad, text, conf in self.reader.readtext(rgb):
+        for quad, text, conf in self.reader.readtext(rgb, mag_ratio=mag_ratio):
             if conf < min_confidence:
                 continue
             out.append(
@@ -209,7 +297,21 @@ class Perception:
         img = self.capture()
         h, w = img.shape[:2]
 
-        elements = self.ocr(img) if run_ocr else []
+        elements: List[Element] = []
+        if run_ocr:
+            if self.cache_ocr and self._last_img is not None \
+                    and not screen_changed(self._last_img, img):
+                elements = self._last_elements
+                self.ocr_skipped += 1
+            else:
+                elements = self.ocr(img)
+                if self.cv_elements:
+                    elements = merge_elements(elements, detect_cv_elements(img))
+                self.ocr_calls += 1
+                # 只在真跑了 OCR 时换锚点帧。命中缓存也换的话，一连串低于阈值的
+                # 小变化会一路命中下去，界面早就不是缓存那一帧了。
+                self._last_img, self._last_elements = img, elements
+
         small, _ = resize_for_model(img, self.long_edge, self.max_pixels)
 
         path = ""

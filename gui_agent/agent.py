@@ -1,6 +1,12 @@
-"""Agent 框架：任务拆解与规划、动作解析、结果反馈。
+"""Agent 框架：任务拆解与规划、动作解析、结果反馈、错误检测与重试。
 
-对应大纲第 3 周第 2、3 项，第 4 周。
+对应大纲第 3 周第 2、3 项，第 4 周，第 6 周第 1、2 项。
+
+容错分三层，各管一类问题：
+  重试      截图失败、模型吐不出合法 JSON、坐标越界这类单步故障，重来一次往往就过
+            （retry_limit，连续失败超过额度才放弃整条任务）
+  变化检测  动作执行成功但界面没动，说明点空了，把这件事喂回历史让模型换目标
+  卡住判定  连续几步重复同一动作且界面一直没变，停下来，不在无效操作上耗完步数
 
 循环结构参考 ScreenAgent 的 Planning-Acting-Reflecting：每一步先看屏幕，再让模型
 给出 Thought 和 Action，执行后把结果写回历史供下一步参考。Thought 的写法对齐
@@ -21,6 +27,7 @@ from typing import List, Optional, Tuple
 
 from .chain import TEMPLATE, build_chain
 from .control import Controller, is_failsafe
+from .monitor import Monitor
 from .perception import screen_changed
 from .planner import REFORMULATE, RETRY, SUCCESS, Planner, acting_instruction
 from .schema import Action, ScreenState, Step, Trajectory
@@ -28,19 +35,29 @@ from .schema import Action, ScreenState, Step, Trajectory
 MAX_STEPS = 15
 MAX_ELEMENTS = 60  # 送进提示词的元素上限，太多会挤占上下文
 REPEAT_LIMIT = 3   # 同一个动作连续这么多次就停，避免在无效操作上空转
+RETRY_LIMIT = 2    # 连续失败几次还允许重试，超过就放弃整条任务
+RETRY_BACKOFF = 0.4  # 重试前等一下，界面动画没停时重截图会拿到中间帧
 
 # 提示词模板在 chain.py，用 LangChain 的 PromptTemplate 管理，两边共用一份
 SYSTEM_PROMPT = TEMPLATE.split("\n\n任务：")[0].replace("{{", "{").replace("}}", "}")
 
 
 def format_elements(state: ScreenState, limit: int = MAX_ELEMENTS) -> str:
-    """把识别出的元素列成编号清单。空文本的元素对模型没用，跳过。"""
+    """把识别出的元素列成编号清单。
+
+    OCR 元素按识别到的文字列；OpenCV 补的图标候选框没有文字，标成「图标」，
+    模型至少能按编号指到它。没有来源标记又没有文字的元素对模型没用，跳过。
+    """
     lines = []
     for e in state.elements:
-        if not e.text.strip():
+        if e.text.strip():
+            label = e.text
+        elif e.source == "cv":
+            label = "（图标，未识别出文字）"
+        else:
             continue
         cx, cy = e.center()
-        lines.append(f"  [{e.id}] {e.text}  (位置 {cx:.2f}, {cy:.2f})")
+        lines.append(f"  [{e.id}] {label}  (位置 {cx:.2f}, {cy:.2f})")
         if len(lines) >= limit:
             break
     return "\n".join(lines) if lines else "  （没有识别到文字元素）"
@@ -201,6 +218,9 @@ class Agent:
         max_replans: int = 2,
         locate_target: bool = False,
         detect_change: bool = True,
+        monitor: Optional[Monitor] = None,
+        retry_limit: int = RETRY_LIMIT,
+        retry_backoff: float = RETRY_BACKOFF,
     ) -> None:
         self.perception = perception
         self.controller = controller
@@ -219,6 +239,13 @@ class Agent:
         # 每步执行后比一次屏幕，判断动作有没有产生效果。多一次截图（1280x720 下
         # 25 ms），不跑 OCR，开销可以忽略，所以默认开。
         self.detect_change = detect_change
+        # 容错：单步失败先重试，不要一失败就废掉整条任务。截图偶发失败、模型
+        # 偶尔吐不出合法 JSON、坐标算出界，这几类重来一次往往就过了；重试时会
+        # 重新截图，失败原因也进了历史，模型有机会换个做法。
+        self.retry_limit = retry_limit
+        self.retry_backoff = retry_backoff
+        # 实时记录。不给就用一个只打印不落盘的，Agent 里不用为此加分支。
+        self.monitor = monitor if monitor is not None else Monitor(quiet=True)
         self._chain = None
         self._chain_vlm = None
 
@@ -257,14 +284,20 @@ class Agent:
 
     def run(self, instruction: str, task_id: str = "") -> Trajectory:
         traj = Trajectory(task_id=task_id or instruction[:24], instruction=instruction)
+        self.monitor.task_start(instruction, traj.task_id)
         last_state = ScreenState(width=0, height=0)
         planner = Planner(self.vlm) if self.plan else None
         planned = False  # 第一次感知拿到屏幕后才能拆解
+        fails = 0        # 连续失败步数，成功一步就清零
 
         for _ in range(self.max_steps):
             t0 = time.perf_counter()
             try:
-                state, model_img = self.perception.perceive(save_to=self._shot_path(traj))
+                # 两段式定位的提示词里没有元素清单，这一步的 OCR 结果没人用，1280x720
+                # 下白花 0.71s。只有拆解子任务那一次要看清单，单独判一下。
+                need_ocr = not self.locate_target or (planner is not None and not planned)
+                state, model_img = self.perception.perceive(
+                    run_ocr=need_ocr, save_to=self._shot_path(traj))
                 last_state = state
 
                 if planner is not None and not planned:
@@ -272,6 +305,7 @@ class Agent:
                     planner.plan(model_img, instruction, state)
                     planned = True
                     traj.subtasks = list(planner.subtasks)
+                    self.monitor.plan(traj.subtasks)
 
                 thought, action = self.chain.invoke({
                     "instruction": acting_instruction(
@@ -289,8 +323,16 @@ class Agent:
                     Step(last_state, Action("call_user", thought=msg),
                          ok=False, error=msg, elapsed=time.perf_counter() - t0)
                 )
-                traj.success = False
-                break
+                self.monitor.step(traj.n_steps, traj.steps[-1],
+                                  planner.current() if planner else None)
+                fails += 1
+                if fails > self.retry_limit:
+                    traj.success = False
+                    break
+                traj.retries += 1
+                self.monitor.retry(fails, msg)
+                time.sleep(self.retry_backoff)
+                continue  # 回到循环开头重新截图重新问，不废掉整条轨迹
 
             action.thought = thought
             result = self.controller.execute(action)
@@ -311,13 +353,25 @@ class Agent:
                 Step(state, action, ok=result.ok, error=result.error,
                      elapsed=time.perf_counter() - t0, changed=changed)
             )
+            self.monitor.step(traj.n_steps, traj.steps[-1],
+                              planner.current() if planner else None)
 
             if action.type == "finished":
                 traj.success = True
                 break
-            if action.type == "call_user" or not result.ok:
-                traj.success = False
+            if action.type == "call_user":
+                traj.success = False  # 模型主动求助，重试没有意义
                 break
+            if not result.ok:
+                fails += 1
+                if fails > self.retry_limit:
+                    traj.success = False
+                    break
+                traj.retries += 1
+                self.monitor.retry(fails, result.error or "")
+                time.sleep(self.retry_backoff)
+                continue
+            fails = 0
 
             # Reflecting：看执行后的屏幕，判断当前子任务完成没有
             if planner is not None and planner.current() is not None \
@@ -330,6 +384,7 @@ class Agent:
                         raise
                     situation = RETRY  # 反思失败不该中断任务，当作要重试
                 traj.reflections.append(situation)
+                self.monitor.reflect(situation, planner.current())
 
                 if situation == SUCCESS:
                     # 只推进子任务，不据此判定整条任务成功。实测反思会连续给出
@@ -361,4 +416,5 @@ class Agent:
 
         if traj.success is None and traj.n_steps >= self.max_steps:
             traj.success = False  # 走完步数上限还没结束，算失败
+        self.monitor.finish(traj)
         return traj

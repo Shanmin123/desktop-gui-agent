@@ -236,3 +236,97 @@ def basic_tasks() -> List[Task]:
             teardown=_close_notepad,
         ),
     ]
+
+
+# --- 复杂任务（大纲第 6 周第 1 项）------------------------------------------
+#
+# 基础任务一步或两步就能完成，验不出拆解有没有用。这里的任务都要跨两个以上
+# 的子目标，中间任一环节漏掉，最终文件就对不上，验收会挂。
+
+
+def _setup_append_and_save_as() -> Dict:
+    (_scratch() / "sample.txt").write_text("原始内容\n", encoding="utf-8")
+    (_scratch() / "reviewed.txt").unlink(missing_ok=True)
+    _close_notepad()
+    return {}
+
+
+def _check_append_and_save_as(before: Dict) -> bool:
+    """新文件要同时留有原内容和追加的那行，少一样都说明有子目标没做到。"""
+    path = SCRATCH / "reviewed.txt"
+    return file_contains(path, "原始内容") and file_contains(path, "已审阅")
+
+
+def _setup_copy_between_files() -> Dict:
+    (_scratch() / "source.txt").write_text("需要复制的一行文字\n", encoding="utf-8")
+    (_scratch() / "copy.txt").unlink(missing_ok=True)
+    _close_notepad()
+    return {}
+
+
+def _setup_write_two_files() -> Dict:
+    for name in ("first.txt", "second.txt"):
+        (_scratch() / name).unlink(missing_ok=True)
+    _scratch()
+    _close_notepad()
+    return {}
+
+
+def _check_write_two_files(before: Dict) -> bool:
+    return (file_contains(SCRATCH / "first.txt", "第一份")
+            and file_contains(SCRATCH / "second.txt", "第二份"))
+
+
+def _setup_open_two_apps() -> Dict:
+    _close_notepad()
+    return {"browsers": browser_pids(), "editors": pids_of(EDITOR_NAME),
+            "titles": window_titles()}
+
+
+def _check_open_two_apps(before: Dict) -> bool:
+    """两个程序都要起来，只开一个不算完成。"""
+    new_browser = bool(browser_pids() - before["browsers"])
+    new_editor = bool(pids_of(EDITOR_NAME) - before["editors"])
+    new_window = bool(window_titles() - before["titles"])
+    return new_browser and new_editor and new_window
+
+
+def complex_tasks() -> List[Task]:
+    """需要拆解的多步任务，用来验第 6 周第 1 项的规划能力。"""
+    return [
+        Task(
+            id="append_and_save_as",
+            instruction=f"用记事本打开 {SCRATCH / 'sample.txt'}，在文字末尾另起一行写"
+                        f"「已审阅」，然后另存为 {SCRATCH / 'reviewed.txt'}",
+            setup=_setup_append_and_save_as,
+            check=_check_append_and_save_as,
+            teardown=_close_notepad,
+            note="三个子目标：打开、编辑、另存为。另存为要走对话框，最容易漏",
+        ),
+        Task(
+            id="copy_between_files",
+            instruction=f"用记事本打开 {SCRATCH / 'source.txt'}，把里面的文字全选复制，"
+                        f"再新建一个记事本粘贴进去，保存为 {SCRATCH / 'copy.txt'}",
+            setup=_setup_copy_between_files,
+            check=lambda before: file_contains(SCRATCH / "copy.txt", "需要复制的一行文字"),
+            teardown=_close_notepad,
+            note="跨两个窗口，要用到剪贴板，验收比对的是内容不是文件是否存在",
+        ),
+        Task(
+            id="write_two_files",
+            instruction=f"用记事本新建两个文件：{SCRATCH / 'first.txt'} 内容写「第一份」，"
+                        f"{SCRATCH / 'second.txt'} 内容写「第二份」",
+            setup=_setup_write_two_files,
+            check=_check_write_two_files,
+            teardown=_close_notepad,
+            note="两条独立的子任务，做完一条要能切回来做第二条",
+        ),
+        Task(
+            id="open_two_apps",
+            instruction="先打开浏览器，再打开记事本，两个都要开着",
+            setup=_setup_open_two_apps,
+            check=_check_open_two_apps,
+            teardown=_close_notepad,
+            note="跨程序，验收要求两个都起来，只开一个不通过",
+        ),
+    ]

@@ -305,3 +305,99 @@ def test_no_adapter_by_default(monkeypatch):
                         lambda mid, load_in_4bit=False, adapter=None: seen.update(adapter=adapter))
     models.load_vlm(_args())
     assert seen["adapter"] is None
+
+
+# --- 故障注入（大纲第 6 周第 2 项）------------------------------------------
+
+
+class _CountingVLM:
+    def __init__(self):
+        self.calls = 0
+
+    def ask(self, image, prompt, **kw):
+        self.calls += 1
+        return '{"action": {"type": "wait"}}'
+
+    def resized_size(self, h, w):
+        return (h, w)
+
+
+def test_flaky_injects_about_the_given_rate():
+    from gui_agent.models import FlakyVLM
+
+    f = FlakyVLM(_CountingVLM(), rate=0.3, seed=0)
+    for _ in range(1000):
+        f.ask(None, "x")
+    assert 250 <= f.injected <= 350, f"注入了 {f.injected}/1000，偏离 30% 太多"
+
+
+def test_flaky_is_reproducible_across_runs():
+    """同一个种子两次跑要一模一样，否则开关重试的对照不可比。"""
+    from gui_agent.models import FlakyVLM
+
+    def pattern():
+        f = FlakyVLM(_CountingVLM(), rate=0.5, seed=7)
+        return [f.ask(None, "x").startswith("（注入") for _ in range(50)]
+
+    assert pattern() == pattern()
+
+
+def test_flaky_rate_zero_never_injects():
+    from gui_agent.models import FlakyVLM
+
+    inner = _CountingVLM()
+    f = FlakyVLM(inner, rate=0.0)
+    for _ in range(20):
+        assert f.ask(None, "x").startswith("{")
+    assert f.injected == 0 and inner.calls == 20
+
+
+def test_flaky_rate_one_always_injects():
+    from gui_agent.models import FlakyVLM
+
+    inner = _CountingVLM()
+    f = FlakyVLM(inner, rate=1.0)
+    for _ in range(20):
+        assert not f.ask(None, "x").startswith("{")
+    assert inner.calls == 0, "全注入时不该再去问真模型，白花推理时间"
+
+
+def test_flaky_forwards_other_methods():
+    from gui_agent.models import FlakyVLM
+
+    assert FlakyVLM(_CountingVLM(), rate=1.0).resized_size(720, 1280) == (720, 1280)
+
+
+def test_flaky_rejects_bad_rate():
+    import pytest
+
+    from gui_agent.models import FlakyVLM
+
+    for bad in (-0.1, 1.5):
+        with pytest.raises(ValueError):
+            FlakyVLM(_CountingVLM(), rate=bad)
+
+
+def test_injected_failure_is_recoverable_by_retry():
+    """注入的故障必须是重试能救回来的那一类，否则测不出重试的价值。"""
+    import numpy as np
+
+    from gui_agent.agent import Agent
+    from gui_agent.control import Controller, RecordingBackend
+    from gui_agent.models import FlakyVLM
+    from gui_agent.schema import Element, ScreenState
+
+    screen = ScreenState(1280, 720, elements=[Element(id=0, bbox=(0.1, 0.1, 0.2, 0.2), text="x")])
+
+    class P:
+        def perceive(self, **kw):
+            return screen, np.zeros((10, 10, 3), dtype=np.uint8)
+
+    class Finisher:
+        def ask(self, image, prompt, **kw):
+            return '{"action": {"type": "finished"}}'
+
+    flaky = FlakyVLM(Finisher(), rate=0.5, seed=3)
+    t = Agent(P(), Controller(backend=RecordingBackend(), dry_run=True), flaky,
+              retry_backoff=0).run("x")
+    assert t.success is True and t.retries >= 1

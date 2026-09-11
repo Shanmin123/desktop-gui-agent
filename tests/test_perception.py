@@ -1,3 +1,4 @@
+import cv2
 import numpy as np
 import pytest
 
@@ -312,3 +313,186 @@ def test_works_on_differently_sized_frames():
     from gui_agent.perception import screen_changed
 
     assert screen_changed(_solid(10, (720, 1280, 3)), _solid(200, (1080, 1920, 3))) is True
+
+
+# --- 非文字控件的候选框（大纲第 6 周第 3 项）--------------------------------
+
+
+def _ui_screenshot(n_icons=6, size=32):
+    """画一张假界面：浅色背景 + 一排深色方块当图标。"""
+    img = np.full((720, 1280, 3), 240, dtype=np.uint8)
+    for i in range(n_icons):
+        x = 50 + i * 60
+        cv2.rectangle(img, (x, 100), (x + size, 100 + size), (30, 60, 200), -1)
+    return img
+
+
+def test_cv_finds_the_icons():
+    from gui_agent.perception import detect_cv_elements
+
+    els = detect_cv_elements(_ui_screenshot(n_icons=6))
+    assert len(els) >= 6
+    assert all(e.source == "cv" and e.text == "" for e in els)
+
+
+def test_cv_boxes_are_normalized_and_ordered():
+    from gui_agent.perception import detect_cv_elements
+
+    els = detect_cv_elements(_ui_screenshot())
+    for e in els:
+        x1, y1, x2, y2 = e.bbox
+        assert 0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0
+    # 排序按像素面积，这里用归一化坐标反算，同样大小的框会差在浮点末位
+    areas = [(e.bbox[2] - e.bbox[0]) * (e.bbox[3] - e.bbox[1]) for e in els]
+    assert all(a >= b - 1e-9 for a, b in zip(areas, areas[1:])), "应按面积从大到小排"
+
+
+def test_cv_skips_full_screen_panels_and_thin_lines():
+    """整块面板和分割线不是可点的图标，不该收进来。"""
+    from gui_agent.perception import detect_cv_elements
+
+    img = np.full((720, 1280, 3), 240, dtype=np.uint8)
+    cv2.rectangle(img, (100, 100), (1100, 600), (10, 10, 10), 3)   # 大面板
+    cv2.rectangle(img, (100, 650), (1100, 653), (10, 10, 10), -1)  # 细线
+    assert detect_cv_elements(img) == []
+
+
+def test_cv_respects_the_cap():
+    from gui_agent.perception import detect_cv_elements
+
+    assert len(detect_cv_elements(_ui_screenshot(n_icons=30), max_elements=5)) == 5
+
+
+def test_cv_on_blank_screen_finds_nothing():
+    from gui_agent.perception import detect_cv_elements
+
+    assert detect_cv_elements(np.full((720, 1280, 3), 200, dtype=np.uint8)) == []
+
+
+def test_cv_on_tiny_image_does_not_crash():
+    from gui_agent.perception import detect_cv_elements
+
+    assert detect_cv_elements(np.zeros((1, 1, 3), dtype=np.uint8)) == []
+
+
+# --- 合并 -------------------------------------------------------------------
+
+
+def test_merge_renumbers_continuously():
+    """编号是模型指元素用的，合并后必须连续且唯一。"""
+    from gui_agent.perception import merge_elements
+
+    ocr = [Element(id=7, bbox=(0.0, 0.0, 0.1, 0.1), text="保存")]
+    cv_els = [Element(id=3, bbox=(0.5, 0.5, 0.6, 0.6), source="cv"),
+              Element(id=9, bbox=(0.7, 0.7, 0.8, 0.8), source="cv")]
+    out = merge_elements(ocr, cv_els)
+    assert [e.id for e in out] == [0, 1, 2]
+    assert [e.source for e in out] == ["ocr", "cv", "cv"]
+
+
+def test_merge_drops_cv_boxes_that_are_text():
+    """和 OCR 框重叠的 CV 框就是那段文字，收进来等于同一个东西两个编号。"""
+    from gui_agent.perception import merge_elements
+
+    ocr = [Element(id=0, bbox=(0.10, 0.10, 0.20, 0.15), text="保存")]
+    overlapping = Element(id=0, bbox=(0.11, 0.10, 0.21, 0.15), source="cv")
+    apart = Element(id=1, bbox=(0.60, 0.60, 0.70, 0.65), source="cv")
+    out = merge_elements(ocr, [overlapping, apart])
+    assert len(out) == 2 and out[1].bbox == apart.bbox
+
+
+def test_merge_does_not_mutate_inputs():
+    from gui_agent.perception import merge_elements
+
+    ocr = [Element(id=5, bbox=(0.0, 0.0, 0.1, 0.1), text="a")]
+    merge_elements(ocr, [])
+    assert ocr[0].id == 5
+
+
+def test_merge_without_cv_boxes_is_just_renumbering():
+    from gui_agent.perception import merge_elements
+
+    ocr = [Element(id=4, bbox=(0.0, 0.0, 0.1, 0.1), text="a"),
+           Element(id=9, bbox=(0.2, 0.2, 0.3, 0.3), text="b")]
+    out = merge_elements(ocr, [])
+    assert [e.id for e in out] == [0, 1] and [e.text for e in out] == ["a", "b"]
+
+
+# --- 屏幕没变时复用 OCR 结果 ------------------------------------------------
+
+
+class _FakeSct:
+    def __init__(self, frames):
+        self.frames = list(frames)
+        self.monitors = [None, {"top": 0, "left": 0, "width": 1280, "height": 720}]
+
+    def grab(self, _):
+        f = self.frames.pop(0) if len(self.frames) > 1 else self.frames[0]
+        return np.dstack([f, np.full(f.shape[:2], 255, np.uint8)])
+
+    def close(self):
+        pass
+
+
+def _perception_over(frames, **kw):
+    from gui_agent.perception import Perception
+
+    p = Perception.__new__(Perception)
+    p.monitor, p.gpu, p.langs = 1, False, ["en"]
+    p.long_edge, p.max_pixels = DEFAULT_LONG_EDGE, DEFAULT_MAX_PIXELS
+    p.cache_ocr = kw.get("cache_ocr", False)
+    p.cv_elements = False
+    p._sct = _FakeSct(frames)
+    p._reader = None
+    p._last_img, p._last_elements = None, []
+    p.ocr_calls = p.ocr_skipped = 0
+    p.ocr = lambda img, **kw2: [Element(id=0, bbox=(0.1, 0.1, 0.2, 0.2),
+                                        text=f"第{p.ocr_calls + 1}次")]
+    return p
+
+
+def test_cache_skips_ocr_when_screen_is_unchanged():
+    frame = np.full((720, 1280, 3), 120, dtype=np.uint8)
+    p = _perception_over([frame, frame, frame], cache_ocr=True)
+    for _ in range(3):
+        p.perceive()
+    assert p.ocr_calls == 1 and p.ocr_skipped == 2
+
+
+def test_cache_reruns_ocr_when_screen_changes():
+    a = np.full((720, 1280, 3), 120, dtype=np.uint8)
+    b = np.full((720, 1280, 3), 220, dtype=np.uint8)
+    p = _perception_over([a, b, a], cache_ocr=True)
+    seen = [p.perceive()[0].elements[0].text for _ in range(3)]
+    assert p.ocr_calls == 3 and p.ocr_skipped == 0
+    assert seen == ["第1次", "第2次", "第3次"]
+
+
+def test_cache_off_by_default_always_runs_ocr():
+    frame = np.full((720, 1280, 3), 120, dtype=np.uint8)
+    p = _perception_over([frame, frame, frame])
+    for _ in range(3):
+        p.perceive()
+    assert p.ocr_calls == 3 and p.ocr_skipped == 0
+
+
+def test_cache_not_consulted_when_ocr_is_off():
+    """run_ocr=False 是变化检测那一路，不该污染缓存。"""
+    a = np.full((720, 1280, 3), 120, dtype=np.uint8)
+    b = np.full((720, 1280, 3), 220, dtype=np.uint8)
+    p = _perception_over([a, b, a], cache_ocr=True)
+    p.perceive()                 # OCR 一次，缓存 a
+    p.perceive(run_ocr=False)    # 看到 b，但不该覆盖缓存
+    state, _ = p.perceive()      # 又是 a，该命中缓存
+    assert p.ocr_calls == 1 and p.ocr_skipped == 1
+    assert state.elements[0].text == "第1次"
+
+
+def test_cache_anchor_does_not_drift():
+    """一连串低于阈值的小变化不能一路命中缓存，否则界面早就不是那一帧了。"""
+    frames = [np.full((720, 1280, 3), 100 + i, dtype=np.uint8) for i in range(8)]
+    p = _perception_over(frames, cache_ocr=True)
+    for _ in range(8):
+        p.perceive()
+    # 相邻帧只差 1，单看相邻永远判不出变化；累积到 8 就该重跑
+    assert p.ocr_calls >= 2, "锚点跟着走了，累积变化没被发现"

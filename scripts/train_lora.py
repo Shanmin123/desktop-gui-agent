@@ -74,6 +74,10 @@ def main() -> None:
     ap.add_argument("--max-len", type=int, default=2048, help="超长样本直接跳过")
     ap.add_argument("--eval-every", type=int, default=200, help="每多少步在验证集上看一次")
     ap.add_argument("--eval-samples", type=int, default=40)
+    ap.add_argument("--save-every", type=int, default=20,
+                    help="每多少次更新存一次适配器权重。只在最后存的话，训练中途卡死"
+                         "就什么都拿不到——第一次跑到 160/175 时 backward 挂住，"
+                         "几个小时的训练全丢了。0 表示只在结束时存")
     ap.add_argument("--load-in-4bit", action="store_true")
     ap.add_argument("--tag", default="lora")
     ap.add_argument("--seed", type=int, default=42)
@@ -136,6 +140,22 @@ def main() -> None:
 
     OUTPUT.mkdir(exist_ok=True)
     log = {"args": vars(args), "train_size": len(train), "kinds": kinds, "steps": []}
+
+    def save(step: int, log: dict, t_start: float, skipped: int) -> None:
+        """存一次权重，顺手把「这份权重练了多少步」写清楚。
+
+        只有最后存一次的话，中途卡死就什么都拿不到。适配器只有 7.4 M 参数，
+        存一次不到一秒，多存几次不心疼。
+        """
+        out = OUTPUT / args.tag
+        model.save_pretrained(out)
+        (ROOT / "logs" / f"train_{args.tag}.json").write_text(json.dumps(
+            {**log, "saved_at_step": step, "planned_steps": total,
+             "skipped_too_long": skipped,
+             "train_minutes": round((time.perf_counter() - t_start) / 60, 1),
+             "peak_vram_gb": round(torch.cuda.max_memory_allocated() / 1024**3, 2)},
+            ensure_ascii=False, indent=2), encoding="utf-8")
+
     print(f"\n开始训练：{args.epochs} 轮，累积 {args.accum} 步，共约 {total} 次更新")
     model.train()
     seen = skipped = 0
@@ -171,19 +191,17 @@ def main() -> None:
                     v = evaluate()
                     print(f"    验证 loss {v:.4f}")
                     log["steps"][-1]["val_loss"] = round(v, 4)
+                if args.save_every and step % args.save_every == 0:
+                    save(step, log, t_start, skipped)
 
-    log["skipped_too_long"] = skipped
     log["final_val_loss"] = round(evaluate(), 4)
     log["train_minutes"] = round((time.perf_counter() - t_start) / 60, 1)
     log["peak_vram_gb"] = round(torch.cuda.max_memory_allocated() / 1024**3, 2)
     print(f"\n训练完成：{log['train_minutes']} 分钟，验证 loss {log['final_val_loss']}，"
           f"峰值 {log['peak_vram_gb']} GB，跳过超长样本 {skipped} 条")
 
-    out = OUTPUT / args.tag
-    model.save_pretrained(out)
-    (ROOT / "logs" / f"train_{args.tag}.json").write_text(
-        json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"权重存到 {out}")
+    save(seen // args.accum, log, t_start, skipped)
+    print(f"权重存到 {OUTPUT / args.tag}")
 
 
 if __name__ == "__main__":

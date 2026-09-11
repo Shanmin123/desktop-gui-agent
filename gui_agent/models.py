@@ -264,3 +264,36 @@ class OpenAICompatVLM:
         rh, rw = self.resized_size(h, w)
         cx, cy = box_center(box)
         return min(max(cx / rw, 0.0), 1.0), min(max(cy / rh, 0.0), 1.0)
+
+
+class FlakyVLM:
+    """按给定比例把模型输出换成垃圾，用来测容错（大纲第 6 周第 2 项）。
+
+    真实故障（显存不足、模型偶尔吐不出 JSON、截图失败）出现得不规律，等它自己发生
+    没法做对照。这里按固定比例主动制造同一类故障：输出变成不可解析的文本，Agent
+    那一步就会解析失败，走到重试逻辑上。
+
+    seed 固定，同一比例下每次注入的位置一样，开关重试两次跑才可比。
+    """
+
+    def __init__(self, vlm, rate: float = 0.3, seed: int = 0) -> None:
+        if not 0.0 <= rate <= 1.0:
+            raise ValueError(f"故障比例要在 0~1 之间，收到 {rate}")
+        import random
+
+        self.vlm = vlm
+        self.rate = rate
+        self._rng = random.Random(seed)
+        self.injected = 0
+        self.calls = 0
+
+    def ask(self, image, prompt: str, **kw) -> str:
+        self.calls += 1
+        if self._rng.random() < self.rate:
+            self.injected += 1
+            return "（注入的故障：这不是 JSON）"
+        return self.vlm.ask(image, prompt, **kw)
+
+    def __getattr__(self, name):
+        # resized_size、locate 这些照常转给真模型，只有 ask 被换掉
+        return getattr(self.vlm, name)

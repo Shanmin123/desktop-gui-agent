@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gui_agent.agent import Agent
 from gui_agent.control import Controller, PyAutoGUIBackend
+from gui_agent.monitor import Monitor
 from gui_agent.models import DEFAULT_MODEL, add_backend_args, load_vlm
 from gui_agent.perception import Perception
 
@@ -47,6 +48,12 @@ def main() -> None:
     ap.add_argument("--max-steps", type=int, default=15)
     add_backend_args(ap)
     ap.add_argument("--delay", type=float, default=3.0, help="--live 时开始前的等待秒数")
+    ap.add_argument("--no-detect-change", action="store_true",
+                    help="关掉执行后的屏幕变化检测")
+    ap.add_argument("--cache-ocr", action="store_true",
+                    help="屏幕没变就复用上一次的 OCR 结果")
+    ap.add_argument("--cv-elements", action="store_true",
+                    help="额外用 OpenCV 找图标候选框，让没文字的控件也有编号")
     ap.add_argument("--locate-target", action="store_true",
                     help="两段式定位：先让模型说要操作哪个控件，再用定位提示词解析坐标")
     ap.add_argument("--plan", action="store_true",
@@ -64,10 +71,13 @@ def main() -> None:
     vlm = load_vlm(args)
     print(f"  耗时 {time.perf_counter() - t0:.1f}s\n")
 
-    perception = Perception()
+    perception = Perception(cache_ocr=args.cache_ocr,
+                            cv_elements=args.cv_elements)
     controller = Controller(backend=PyAutoGUIBackend(), dry_run=not args.live)
     agent = Agent(perception, controller, vlm, max_steps=args.max_steps,
-                  plan=args.plan, locate_target=args.locate_target)
+                  plan=args.plan, locate_target=args.locate_target,
+                  detect_change=not args.no_detect_change,
+                  monitor=Monitor(str(ROOT / "logs" / "run_agent.jsonl")))
 
     print(f"任务：{args.instruction}\n")
     traj = agent.run(args.instruction)

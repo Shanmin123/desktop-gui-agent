@@ -212,16 +212,18 @@ def test_loop_stops_on_finished(screen):
 
 
 def test_loop_stops_on_failed_action(screen):
-    vlm = FakeVLM(['{"action": {"type": "hotkey", "text": "win+l"}}',  # 被安全拦截
-                   '{"action": {"type": "finished"}}'])
+    """被安全策略拦下的动作重试到额度用光才结束。"""
+    vlm = FakeVLM(['{"action": {"type": "hotkey", "text": "win+l"}}'] * 5)
     a = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm)
     t = a.run("锁屏")
-    assert t.n_steps == 1 and t.success is False
+    assert t.n_steps == 3 and t.retries == 2  # 第一次 + 两次重试
+    assert t.success is False and all(not s.ok for s in t.steps)
 
 
 def test_loop_stops_on_bad_element_id(screen):
     vlm = FakeVLM(['{"action": {"type": "click", "element": 99}}'])
-    a = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm)
+    a = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm,
+              retry_limit=0)
     t = a.run("点不存在的东西")
     assert t.n_steps == 1 and not t.steps[0].ok
     assert t.success is False  # 解析失败要判成失败，不能留 None 当没判过
@@ -230,9 +232,66 @@ def test_loop_stops_on_bad_element_id(screen):
 def test_unparseable_output_is_a_failed_step(screen):
     """解析失败不能记成成功的 call_user，否则微调数据里就是错标。"""
     vlm = FakeVLM(["模型今天不想输出 JSON"])
-    t = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm).run("x")
+    t = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm,
+              retry_limit=0).run("x")
     assert t.n_steps == 1 and not t.steps[0].ok and t.steps[0].error
     assert t.success is False
+
+
+# --- 失败重试（大纲第 6 周第 2 项）------------------------------------------
+
+
+def test_retry_limit_zero_stops_at_the_first_failure(screen):
+    vlm = FakeVLM(['{"action": {"type": "hotkey", "text": "win+l"}}'] * 5)
+    t = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm,
+              retry_limit=0).run("锁屏")
+    assert t.n_steps == 1 and t.success is False and t.retries == 0
+
+
+def test_recovered_failure_does_not_end_the_task(screen):
+    """第一次失败第二次成功，任务该正常走完，不能被那次失败带走。"""
+    vlm = FakeVLM(['{"action": {"type": "hotkey", "text": "win+l"}}',
+                   '{"action": {"type": "finished"}}'])
+    t = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm,
+              retry_backoff=0).run("x")
+    assert t.success is True and t.retries == 1 and t.n_steps == 2
+
+
+def test_parse_failure_recovers_on_retry(screen):
+    """模型偶尔吐不出合法 JSON，重问一次往往就好了。"""
+    vlm = FakeVLM(["模型今天不想输出 JSON",
+                   '{"action": {"type": "click", "element": 1}}',
+                   '{"action": {"type": "finished"}}'])
+    t = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm,
+              detect_change=False, retry_backoff=0).run("x")
+    assert t.success is True and t.retries == 1
+    assert [s.ok for s in t.steps] == [False, True, True]
+
+
+def test_failure_counter_resets_after_a_good_step(screen):
+    """重试额度不是整条任务累计的，中间成功过就该还回来。"""
+    bad = '{"action": {"type": "hotkey", "text": "win+l"}}'
+    ok = '{"action": {"type": "wait"}}'
+    vlm = FakeVLM([bad, ok, bad, ok, bad, '{"action": {"type": "finished"}}'])
+    t = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm,
+              detect_change=False, retry_backoff=0).run("x")
+    assert t.success is True and t.retries == 3
+
+
+def test_retry_burns_step_budget(screen):
+    """重试要占步数额度，否则一直失败的任务永远跑不完。"""
+    vlm = FakeVLM(['{"action": {"type": "hotkey", "text": "win+l"}}'] * 50)
+    t = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm,
+              max_steps=2, retry_limit=99, retry_backoff=0).run("x")
+    assert t.n_steps == 2 and t.success is False
+
+
+def test_call_user_is_not_retried(screen):
+    """模型主动求助不是故障，重试没有意义。"""
+    vlm = FakeVLM(['{"action": {"type": "call_user", "thought": "这一步我做不了"}}'] * 3)
+    t = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm,
+              retry_backoff=0).run("x")
+    assert t.n_steps == 1 and t.success is False and t.retries == 0
 
 
 def test_perception_failure_keeps_earlier_steps(screen):
@@ -254,13 +313,38 @@ def test_perception_failure_keeps_earlier_steps(screen):
     ctrl = Controller(backend=RecordingBackend(), dry_run=True)
     # 关掉变化检测：它每步多调一次 perceive，会让「第几次调用失败」这件事
     # 变得和实现细节绑定。这条测的是主感知失败时轨迹保不保得住。
-    t = Agent(FlakyPerception(screen), ctrl, vlm, detect_change=False).run("x")
+    t = Agent(FlakyPerception(screen), ctrl, vlm, detect_change=False,
+              retry_limit=0).run("x")
     assert t.n_steps == 3 and t.steps[0].ok and t.steps[1].ok
     assert not t.steps[2].ok and "屏幕抓取失败" in t.steps[2].error
     assert t.success is False
 
 
+def test_transient_perception_failure_is_retried(screen):
+    """截图偶发失败重来一次就好，不该废掉整条任务。"""
+
+    class FlakyPerception(FakePerception):
+        def __init__(self, state):
+            super().__init__(state)
+            self.n = 0
+
+        def perceive(self, **kw):
+            self.n += 1
+            if self.n == 2:
+                raise OSError("屏幕抓取失败")
+            return super().perceive(**kw)
+
+    vlm = FakeVLM(['{"action": {"type": "wait"}}', '{"action": {"type": "finished"}}'])
+    ctrl = Controller(backend=RecordingBackend(), dry_run=True)
+    t = Agent(FlakyPerception(screen), ctrl, vlm, detect_change=False,
+              retry_backoff=0).run("x")
+    assert t.success is True and t.retries == 1
+    assert [s.ok for s in t.steps] == [True, False, True]
+
+
 def test_model_failure_keeps_earlier_steps(screen):
+    """显存不足这类不会自愈的故障，重试用光后要停下来。"""
+
     class BoomVLM(FakeVLM):
         def ask(self, image, prompt, **kw):
             if self.prompts:
@@ -269,8 +353,9 @@ def test_model_failure_keeps_earlier_steps(screen):
 
     vlm = BoomVLM(['{"action": {"type": "wait"}}'])
     ctrl = Controller(backend=RecordingBackend(), dry_run=True)
-    t = Agent(FakePerception(screen), ctrl, vlm).run("x")
-    assert t.n_steps == 2 and t.steps[0].ok and "显存不足" in t.steps[1].error
+    t = Agent(FakePerception(screen), ctrl, vlm, retry_backoff=0).run("x")
+    assert t.n_steps == 4 and t.steps[0].ok and t.retries == 2
+    assert all("显存不足" in s.error for s in t.steps[1:])
     assert t.success is False
 
 
@@ -606,3 +691,87 @@ def test_without_change_info_falls_back_to_action_repetition(screen):
 
     steps = [Step(screen, Action("click", point=(0.5, 0.5))) for _ in range(3)]
     assert is_stuck(steps)
+
+
+# --- 图标元素进提示词（大纲第 6 周第 3 项）----------------------------------
+
+
+def test_cv_elements_appear_in_the_element_list():
+    """CV 补的图标框没有文字，但要有编号可指，否则补了等于没补。"""
+    from gui_agent.agent import format_elements
+
+    state = ScreenState(width=1280, height=720, elements=[
+        Element(id=0, bbox=(0.1, 0.1, 0.2, 0.2), text="文件"),
+        Element(id=1, bbox=(0.5, 0.5, 0.55, 0.55), text="", source="cv"),
+    ])
+    out = format_elements(state)
+    assert "[0] 文件" in out and "[1]" in out and "图标" in out
+
+
+def test_empty_ocr_elements_are_still_skipped():
+    """OCR 偶尔给出空串，那是噪声，不该占编号。"""
+    from gui_agent.agent import format_elements
+
+    state = ScreenState(width=1280, height=720, elements=[
+        Element(id=0, bbox=(0.1, 0.1, 0.2, 0.2), text="  ", source="ocr"),
+        Element(id=1, bbox=(0.3, 0.3, 0.4, 0.4), text="保存", source="ocr"),
+    ])
+    out = format_elements(state)
+    assert "[0]" not in out and "[1] 保存" in out
+
+
+# --- 按配置决定要不要跑 OCR（大纲第 6 周第 3 项）----------------------------
+
+
+class RecordingPerception:
+    """记下每次 perceive 有没有要求跑 OCR。"""
+
+    def __init__(self, state):
+        self.state = state
+        self.ocr_flags = []
+
+    def perceive(self, run_ocr=True, save_to=None):
+        self.ocr_flags.append(run_ocr)
+        return self.state, np.zeros((10, 10, 3), dtype=np.uint8)
+
+
+def test_one_stage_runs_ocr_every_step(screen):
+    """一段式的提示词里有元素清单，每步都得跑。"""
+    per = RecordingPerception(screen)
+    vlm = FakeVLM(['{"action": {"type": "wait"}}', '{"action": {"type": "finished"}}'])
+    Agent(per, Controller(backend=RecordingBackend(), dry_run=True), vlm,
+          detect_change=False).run("x")
+    assert per.ocr_flags == [True, True]
+
+
+def test_two_stage_skips_ocr(screen):
+    """两段式定位不看元素清单，OCR 白跑，1280x720 下每步 0.71s。"""
+    per = RecordingPerception(screen)
+
+    class Locating(FakeVLM):
+        def locate(self, image, instruction):
+            return (0.5, 0.5)
+
+    vlm = Locating(['{"action": {"type": "click", "target": "保存按钮"}}',
+                    '{"action": {"type": "finished"}}'])
+    Agent(per, Controller(backend=RecordingBackend(), dry_run=True), vlm,
+          locate_target=True, detect_change=False).run("x")
+    assert per.ocr_flags == [False, False]
+
+
+def test_two_stage_with_plan_runs_ocr_once(screen):
+    """拆解子任务要看元素清单，只有那一次要跑。"""
+    per = RecordingPerception(screen)
+
+    class Planning(FakeVLM):
+        def locate(self, image, instruction):
+            return (0.5, 0.5)
+
+    vlm = Planning(['["打开菜单", "点保存"]',                              # 拆解
+                    '{"action": {"type": "click", "target": "菜单"}}',     # 第一步
+                    '{"situation": "sub_task_success"}',                   # 反思
+                    '{"action": {"type": "finished"}}'])
+    Agent(per, Controller(backend=RecordingBackend(), dry_run=True), vlm,
+          locate_target=True, plan=True, detect_change=False).run("x")
+    assert per.ocr_flags[0] is True, "第一步要拿元素清单去拆解"
+    assert not any(per.ocr_flags[1:]), "拆完之后就不需要了"

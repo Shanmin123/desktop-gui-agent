@@ -17,21 +17,31 @@ python scripts/check_env.py --ocr    # 额外实测 OCR，首次会下载模型�
 ```
 gui_agent/
     schema.py       屏幕识别结果、动作、执行记录三个数据格式
-    perception.py   截图、多分辨率适配、OCR、UI 元素识别
+    perception.py   截图、多分辨率适配、OCR、UI 元素识别、图标候选框
     control.py      鼠标键盘控制、坐标换算、安全限制
     models.py       大模型调用接口，本地部署与 API 两种后端
-    agent.py        任务规划、动作解析、结果反馈
-    tasks.py        基础任务与程序化验收条件
+    chain.py        LangChain 提示词模板、输出解析、提示词变体
+    planner.py      任务拆解与子任务状态判定
+    agent.py        执行循环、动作解析、错误检测与重试
+    monitor.py      执行状态实时记录，每步落盘
+    tasks.py        基础任务、复杂任务与程序化验收条件
     display.py      临时切换屏幕分辨率
 scripts/
-    run_agent.py         命令行入口，给一句话让智能体去做
-    run_tasks.py         跑基础任务集，统计成功率
-    check_env.py         环境检查
-    bench_perception.py  感知各环节耗时实测
-    calibrate.py         感知与控制联调，测坐标端到端误差
-    prepare_data.py      公开数据集预处理
-    eval_grounding.py    UI 元素定位精度评测
-    md2pdf.py            文档转 PDF，支持合并多份
+    run_agent.py           命令行入口，给一句话让智能体去做
+    run_tasks.py           跑任务集，统计成功率
+    check_env.py           环境检查
+    bench_perception.py    感知各环节耗时实测
+    calibrate.py           感知与控制联调，测坐标端到端误差
+    prepare_data.py        公开数据集预处理
+    build_finetune_data.py 由预处理结果构建微调训练集与验证集
+    train_lora.py          LoRA 微调
+    eval_grounding.py      UI 元素定位精度评测
+    eval_screenagent.py    动作生成评测
+    eval_perception.py     感知模块的命中率与速度评测
+    tune_prompt.py         提示词变体对比
+    snapshot_state.py      记录并核对实验前后的桌面状态
+    gen_test_report.py     由 pytest 收集结果生成单元测试报告
+    md2pdf.py              文档转 PDF，支持合并多份
 tests/              单元测试
 docs/               调研报告、环境配置文档、实验报告
 ```
@@ -46,6 +56,8 @@ docs/               调研报告、环境配置文档、实验报告
 
 **任务验收对比执行前后的状态。** 只看当前状态会把「本来就是这样」判成成功，成功率会虚高。
 
+**容错分三层。** 单步故障先重试；动作执行成功但界面没变，说明点空了，把这件事喂回历史让模型换目标；连续几步重复同一动作且界面一直没变，判定卡住并停下。
+
 **图片读写统一走 `perception.imwrite` / `imread`。** `cv2.imwrite` 在非 ASCII 路径下返回 False 但不抛异常，文件不会写出来。
 
 ## 运行
@@ -56,7 +68,12 @@ python scripts/run_agent.py "打开计算器" --live   # 真的操作桌面
 
 python scripts/run_tasks.py                      # 跑基础任务集，dry-run
 python scripts/run_tasks.py --live --repeat 3    # 真实执行，每个任务跑三次
+python scripts/run_tasks.py --live --set complex --plan   # 多步任务，先拆解再执行
 ```
+
+可选开关：`--locate-target` 两段式定位，`--plan` 先拆解子任务，`--cache-ocr` 屏幕没变时
+复用上一次 OCR，`--cv-elements` 用 OpenCV 补图标候选框，`--resolution 1280x720` 临时切
+分辨率（结束后还原），`--adapter checkpoints/lora_v2` 挂上微调权重。
 
 默认 dry-run。`--live` 会真实操作桌面，开始前有倒计时，鼠标甩到屏幕左上角可强制中断。
 

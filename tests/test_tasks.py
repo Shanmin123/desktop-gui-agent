@@ -200,3 +200,86 @@ def test_open_browser_setup_records_both_baselines():
     t = next(x for x in T.basic_tasks() if x.id == "open_browser")
     snap = t.setup()
     assert "pids" in snap and "titles" in snap
+
+
+# --- 复杂任务（大纲第 6 周第 1 项）------------------------------------------
+
+
+def test_complex_tasks_have_unique_ids_and_do_not_clash_with_basic():
+    from gui_agent.tasks import basic_tasks, complex_tasks
+
+    ids = [t.id for t in complex_tasks()]
+    assert len(ids) == len(set(ids))
+    assert not (set(ids) & {t.id for t in basic_tasks()})
+
+
+def test_complex_tasks_only_touch_scratch():
+    """指令里出现的路径必须都在 scratch 下，不能碰真实文档。"""
+    import re
+
+    from gui_agent.tasks import SCRATCH, complex_tasks
+
+    for t in complex_tasks():
+        for path in re.findall(r"[A-Za-z]:\[^\s，、]+|/[^\s，、]+\.txt", t.instruction):
+            assert str(SCRATCH) in path, f"{t.id} 指令里有 scratch 之外的路径：{path}"
+
+
+def test_complex_checks_fail_before_anything_runs(tmp_path, monkeypatch):
+    """跑之前验收必须全不通过，否则成功率就是白送的。"""
+    import gui_agent.tasks as T
+
+    monkeypatch.setattr(T, "SCRATCH", tmp_path)
+    for t in T.complex_tasks():
+        if t.id == "open_two_apps":
+            continue  # 这条要真进程，另有测试
+        assert t.check({}) is False, f"{t.id} 在什么都没做时就判通过了"
+
+
+def test_append_task_needs_both_old_and_new_content(tmp_path, monkeypatch):
+    import gui_agent.tasks as T
+
+    monkeypatch.setattr(T, "SCRATCH", tmp_path)
+    target = tmp_path / "reviewed.txt"
+    target.write_text("已审阅\n", encoding="utf-8")          # 只有新内容
+    assert T._check_append_and_save_as({}) is False
+    target.write_text("原始内容\n已审阅\n", encoding="utf-8")  # 两样都有
+    assert T._check_append_and_save_as({}) is True
+
+
+def test_two_files_task_needs_both_files(tmp_path, monkeypatch):
+    import gui_agent.tasks as T
+
+    monkeypatch.setattr(T, "SCRATCH", tmp_path)
+    (tmp_path / "first.txt").write_text("第一份\n", encoding="utf-8")
+    assert T._check_write_two_files({}) is False  # 只写了一个不算完成
+    (tmp_path / "second.txt").write_text("第二份\n", encoding="utf-8")
+    assert T._check_write_two_files({}) is True
+
+
+def test_open_two_apps_needs_both_programs(monkeypatch):
+    import gui_agent.tasks as T
+
+    before = {"browsers": {"1"}, "editors": {"2"}, "titles": {"旧窗口"}}
+    monkeypatch.setattr(T, "window_titles", lambda: {"旧窗口", "新窗口"})
+
+    monkeypatch.setattr(T, "browser_pids", lambda: {"1", "3"})
+    monkeypatch.setattr(T, "pids_of", lambda name: {"2"})          # 编辑器没新起
+    assert T._check_open_two_apps(before) is False
+
+    monkeypatch.setattr(T, "browser_pids", lambda: {"1"})          # 浏览器没新起
+    monkeypatch.setattr(T, "pids_of", lambda name: {"2", "4"})
+    assert T._check_open_two_apps(before) is False
+
+    monkeypatch.setattr(T, "browser_pids", lambda: {"1", "3"})
+    assert T._check_open_two_apps(before) is True
+
+
+def test_open_two_apps_needs_a_new_window(monkeypatch):
+    """只多出后台进程不算，和 open_browser 一个道理。"""
+    import gui_agent.tasks as T
+
+    before = {"browsers": {"1"}, "editors": {"2"}, "titles": {"旧窗口"}}
+    monkeypatch.setattr(T, "browser_pids", lambda: {"1", "3"})
+    monkeypatch.setattr(T, "pids_of", lambda name: {"2", "4"})
+    monkeypatch.setattr(T, "window_titles", lambda: {"旧窗口"})
+    assert T._check_open_two_apps(before) is False

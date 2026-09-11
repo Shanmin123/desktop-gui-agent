@@ -265,3 +265,66 @@ def test_agent_rebuilds_chain_when_locate_target_flips(screen):
     a = Agent(P(), Controller(backend=RecordingBackend()), LocatingVLM("{}"),
               locate_target=True)
     assert a.locate_target is True
+
+
+# --- 提示词变体（大纲第 5 周第 4 项）----------------------------------------
+
+
+def _state():
+    return ScreenState(width=1280, height=720,
+                       elements=[Element(id=0, bbox=(0.1, 0.1, 0.2, 0.2), text="文件")])
+
+
+def test_every_variant_renders_without_leftover_placeholders():
+    from gui_agent.chain import PROMPT_VARIANTS, render_prompt
+
+    for name in PROMPT_VARIANTS:
+        p = render_prompt("打开浏览器", _state(), [], variant=name)
+        assert "{instruction}" not in p and "{elements}" not in p and "{history}" not in p
+        assert "打开浏览器" in p and "[0] 文件" in p
+
+
+def test_variants_actually_differ_from_base():
+    from gui_agent.chain import PROMPT_VARIANTS
+
+    others = {k: v for k, v in PROMPT_VARIANTS.items() if k != "base"}
+    assert others, "至少要有一个对照变体"
+    for name, tpl in others.items():
+        assert tpl != PROMPT_VARIANTS["base"], f"{name} 和 base 一模一样，比不出东西"
+
+
+def test_point_first_drops_the_element_first_wording():
+    """这个变体的假设就是「别优先用编号」，措辞必须换掉。"""
+    from gui_agent.chain import PROMPT_VARIANTS
+
+    assert "优先用 element 编号" not in PROMPT_VARIANTS["point_first"]
+    assert "必须给 point" in PROMPT_VARIANTS["point_first"]
+
+
+def test_few_shot_examples_keep_valid_json():
+    """例子里的 JSON 渲染后要还能解析，不然是在教模型输出错格式。"""
+    import json
+    import re
+
+    from gui_agent.chain import render_prompt
+
+    p = render_prompt("x", _state(), [], variant="few_shot")
+    found = re.findall(r'\{"thought".*?\}\}', p)
+    assert len(found) >= 2
+    for s in found:
+        assert json.loads(s)["action"]["type"] in ("hotkey", "click")
+
+
+def test_unknown_variant_raises():
+    import pytest
+
+    from gui_agent.chain import render_prompt
+
+    with pytest.raises(ValueError):
+        render_prompt("x", _state(), [], variant="没有这个")
+
+
+def test_default_variant_matches_the_plain_template():
+    from gui_agent.chain import render_prompt
+
+    assert render_prompt("x", _state(), []) == render_prompt("x", _state(), [], variant="base")

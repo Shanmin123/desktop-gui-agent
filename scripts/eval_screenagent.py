@@ -17,7 +17,7 @@
 用法：
     python scripts/eval_screenagent.py --limit 20   # 先小样本确认跑得通
     python scripts/eval_screenagent.py              # 全量
-    python scripts/eval_screenagent.py --tag lora   # 微调后换 tag 再跑一遍
+    python scripts/eval_screenagent.py --adapter checkpoints/lora_v2 --tag lora
 """
 
 import argparse
@@ -60,6 +60,7 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--tag", default="base")
+    ap.add_argument("--adapter", default=None, help="挂上 LoRA 权重评测微调后的模型")
     ap.add_argument("--no-ocr", action="store_true",
                     help="不跑 OCR，提示词里不带元素清单。默认带，与实际循环一致")
     args = ap.parse_args()
@@ -69,7 +70,7 @@ def main() -> None:
 
     print(f"加载模型 {args.model} ……")
     t0 = time.perf_counter()
-    vlm = LocalQwenVL(args.model)
+    vlm = LocalQwenVL(args.model, adapter=args.adapter)
     print(f"  耗时 {time.perf_counter() - t0:.1f}s")
 
     perception = None if args.no_ocr else Perception()
@@ -144,6 +145,7 @@ def main() -> None:
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps({
         "model": args.model,
+        "adapter": args.adapter,
         "n": n,
         "with_ocr": not args.no_ocr,
         "type_accuracy": n_type_ok / n,

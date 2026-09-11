@@ -219,6 +219,7 @@ class Trajectory:
     started_at: float = field(default_factory=time.time)
     subtasks: List[str] = field(default_factory=list)  # Planning 拆出的子任务
     reflections: List[str] = field(default_factory=list)  # 每次 Reflecting 的判定
+    retries: int = 0  # 失败后重试的次数，不含最终放弃的那一步
 
     @property
     def n_steps(self) -> int:
@@ -238,6 +239,7 @@ class Trajectory:
             "started_at": self.started_at,
             "subtasks": self.subtasks,
             "reflections": self.reflections,
+            "retries": self.retries,
             "steps": [
                 {
                     "screen": {

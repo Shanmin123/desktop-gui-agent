@@ -61,6 +61,49 @@ TEMPLATE = """你在操作一台 Windows 电脑，目标是完成用户给的任
 GUI_PROMPT = PromptTemplate.from_template(TEMPLATE)
 
 
+# --- 提示词变体（大纲第 5 周第 4 项）----------------------------------------
+#
+# 第 2 周的失败归因：模型 111/120 次用 element 编号指位置，而 OCR 只认文字，
+# 图标没有编号可指，于是点在错的地方。下面每个变体针对一个假设，用
+# scripts/tune_prompt.py 在 ScreenAgent 测试划分上比，不靠感觉挑。
+
+_POSITION_RULE = """指定位置时优先用 element 编号。列表里没有对应元素时，用 point 给归一化坐标，
+形如 "point": [0.5, 0.5]，取值 0 到 1。"""
+
+_POINT_FIRST_RULE = """指定位置用 point 给归一化坐标，形如 "point": [0.5, 0.5]，取值 0 到 1，
+以截图左上角为 (0, 0)、右下角为 (1, 1)。
+只有当你要操作的正好是列表里那段文字本身时，才用 element 编号。
+图标、按钮、输入框这些没有文字，列表里不会有，必须给 point。"""
+
+_KEYBOARD_RULE = _POSITION_RULE + """
+
+能用快捷键完成的就别去点菜单：保存 ctrl+s、全选 ctrl+a、复制粘贴 ctrl+c / ctrl+v、
+新建 ctrl+n、关闭 ctrl+w。要输入文字用 type，不要一个字一个字点。"""
+
+_EXAMPLES = """
+两个例子（只是示范格式，和当前任务无关）：
+任务「保存文件」，屏幕上没有可见的保存按钮 ->
+{{"thought": "记事本用 ctrl+s 保存最快", "action": {{"type": "hotkey", "text": "ctrl+s"}}}}
+任务「点左上角的返回箭头」，箭头是图标、元素列表里没有 ->
+{{"thought": "箭头在左上角，估计在 (0.03, 0.06)", "action": {{"type": "click", "point": [0.03, 0.06]}}}}
+"""
+
+
+def _variant(old: str, new: str) -> str:
+    out = TEMPLATE.replace(old, new)
+    if out == TEMPLATE:
+        raise AssertionError("提示词变体没替换成功，模板改过了就要同步改这里")
+    return out
+
+
+PROMPT_VARIANTS = {
+    "base": TEMPLATE,
+    "point_first": _variant(_POSITION_RULE, _POINT_FIRST_RULE),
+    "keyboard": _variant(_POSITION_RULE, _KEYBOARD_RULE),
+    "few_shot": _variant("\n任务：{instruction}", _EXAMPLES + "\n任务：{instruction}"),
+}
+
+
 class ActionOutputParser(BaseOutputParser):
     """把模型输出解析成 (thought, Action)。
 
@@ -81,11 +124,16 @@ class ActionOutputParser(BaseOutputParser):
         return "gui_action"
 
 
-def render_prompt(instruction: str, state: ScreenState, steps: List[Step]) -> str:
-    """套用模板生成一步的提示词。"""
+def render_prompt(instruction: str, state: ScreenState, steps: List[Step],
+                  variant: str = "base") -> str:
+    """套用模板生成一步的提示词。variant 选提示词变体，见 PROMPT_VARIANTS。"""
     from .agent import format_elements, format_history
 
-    return GUI_PROMPT.format(
+    if variant not in PROMPT_VARIANTS:
+        raise ValueError(f"没有 {variant!r} 这个提示词变体，可选 {list(PROMPT_VARIANTS)}")
+    prompt = GUI_PROMPT if variant == "base" else \
+        PromptTemplate.from_template(PROMPT_VARIANTS[variant])
+    return prompt.format(
         instruction=instruction,
         history=format_history(steps),
         elements=format_elements(state),

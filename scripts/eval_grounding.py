@@ -51,6 +51,7 @@ def main() -> None:
     ap.add_argument("--load-in-4bit", action="store_true")
     ap.add_argument("--save-fail", type=int, default=0, help="另存前 N 个失败样本用于排查")
     ap.add_argument("--tag", default="base", help="结果文件名后缀，用于区分微调前后")
+    ap.add_argument("--adapter", default=None, help="挂上 LoRA 权重评测微调后的模型")
     args = ap.parse_args()
 
     from datasets import load_dataset
@@ -62,7 +63,7 @@ def main() -> None:
 
     print(f"加载模型 {args.model} ……")
     t0 = time.perf_counter()
-    vlm = LocalQwenVL(args.model, load_in_4bit=args.load_in_4bit)
+    vlm = LocalQwenVL(args.model, load_in_4bit=args.load_in_4bit, adapter=args.adapter)
     print(f"  耗时 {time.perf_counter() - t0:.1f}s")
 
     import torch
@@ -107,6 +108,7 @@ def main() -> None:
         json.dumps(
             {
                 "model": args.model,
+                "adapter": args.adapter,
                 "n": len(recs),
                 "accuracy": {k: {"hit": v[0], "total": v[1]} for k, v in stats.items()},
                 "avg_latency_s": sum(latencies) / len(latencies),
