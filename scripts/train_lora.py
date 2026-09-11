@@ -193,6 +193,11 @@ def main() -> None:
                     log["steps"][-1]["val_loss"] = round(v, 4)
                 if args.save_every and step % args.save_every == 0:
                     save(step, log, t_start, skipped)
+                    # 顺手把缓存分配器占着不用的块还回去。分配器只涨不缩，样本尺寸
+                    # 不一，碎片会越攒越多；两次训练都是整卡占满之后停在 backward 里
+                    # 空转（利用率 100% 但显存控制器 3%、功耗 55 W），而峰值分配量
+                    # 只有 6.21 GB。
+                    torch.cuda.empty_cache()
 
     log["final_val_loss"] = round(evaluate(), 4)
     log["train_minutes"] = round((time.perf_counter() - t_start) / 60, 1)

@@ -178,12 +178,17 @@ def parse_step(
 
     eid = raw.pop("element", None)
     if eid is not None:
-        # 不能直接 int()：int(1.9) 和 int(True) 都会悄悄变成 1，点到别的控件上
+        # 不能直接 int()：int(1.9) 和 int(True) 都会悄悄变成 1，点到别的控件上。
+        # 但 14.0 这种整数值的浮点要收——微调后的模型常写成 14.0，按不合法拒掉的话
+        # 353 条评测里凭空多出上百条「解析失败」，那是解析器的问题不是模型的。
         if isinstance(eid, bool) or not isinstance(eid, int):
             try:
-                eid = int(str(eid).strip())
+                num = float(str(eid).strip())
             except (TypeError, ValueError):
                 raise ValueError(f"元素编号不是整数：{eid!r}") from None
+            if not num.is_integer():
+                raise ValueError(f"元素编号不是整数：{eid!r}")
+            eid = int(num)
         match = next((e for e in state.elements if e.id == eid), None)
         if match is None:
             raise ValueError(f"元素编号 {eid} 不在当前屏幕的识别结果里")

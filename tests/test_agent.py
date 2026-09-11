@@ -775,3 +775,20 @@ def test_two_stage_with_plan_runs_ocr_once(screen):
           locate_target=True, plan=True, detect_change=False).run("x")
     assert per.ocr_flags[0] is True, "第一步要拿元素清单去拆解"
     assert not any(per.ocr_flags[1:]), "拆完之后就不需要了"
+
+
+# --- 元素编号写成浮点 -------------------------------------------------------
+
+
+@pytest.mark.parametrize("eid", ["1.0", "1.00", '"1.0"'])
+def test_integral_float_element_id_accepted(screen, eid):
+    """微调后的模型常把编号写成 14.0，那是合法的 14，不该判成解析失败。"""
+    _, a = parse_step('{"action": {"type": "click", "element": %s}}' % eid, screen)
+    assert a.point == pytest.approx((0.3, 0.45))
+
+
+@pytest.mark.parametrize("eid", ["1.9", "0.5", "true", '"一"'])
+def test_non_integral_element_id_still_rejected(screen, eid):
+    """1.9 取整会变成 1，点到别的控件上，这类必须继续拒掉。"""
+    with pytest.raises(ValueError, match="不是整数"):
+        parse_step('{"action": {"type": "click", "element": %s}}' % eid, screen)
