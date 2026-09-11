@@ -136,6 +136,7 @@ def main() -> None:
             "with_elements": with_elements,
             "type_accuracy": n_ok / n,
             "keyboard_recall": (kb_hit / kb_total) if kb_total else None,
+            "keyboard_total": kb_total,  # 分母只算解析成功的样本，变体之间不一样
             "median_distance": statistics.median(dists) if dists else None,
             "n_pointed_pairs": len(dists),
             "parse_failures": n_fail,
