@@ -9,7 +9,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from build_finetune_data import (
-    ACTION_TEMPLATE,
     VIEW_H,
     VIEW_W,
     crop_box,
@@ -101,21 +100,19 @@ def test_bbox_translates_into_crop_coordinates():
 # --- 动作提示词 -------------------------------------------------------------
 
 
-def test_action_template_asks_for_normalized_point():
-    p = ACTION_TEMPLATE.format(instruction="打开浏览器")
-    assert "打开浏览器" in p
-    assert "point" in p and "归一化" in p
+def test_action_prompt_is_the_production_one():
+    """动作样本的提示词必须就是推理时那一份，否则学到的迁移不过去。
 
+    第一版用了一个简化模板：训练时没有元素清单，推理时有，还被要求「优先用
+    element 编号」。模型没学过怎么用编号，于是写出 14.0 这种东西。
+    """
+    from gui_agent.chain import render_prompt
+    from gui_agent.schema import Element, ScreenState
 
-def test_action_template_has_no_element_list():
-    """训练目标是让模型直接给坐标，给了元素清单它又会去用编号。"""
-    p = ACTION_TEMPLATE.format(instruction="x")
-    assert "element" not in p and "编号" not in p
-
-
-def test_action_template_braces_survive_format():
-    p = ACTION_TEMPLATE.format(instruction="x")
-    assert '{"thought": "为什么这么做", "action": {"type": "click", "point": [0.5, 0.5]}}' in p
+    state = ScreenState(1024, 768, elements=[
+        Element(id=0, bbox=(0.1, 0.1, 0.2, 0.2), text="文件")])
+    p = render_prompt("打开浏览器", state, [])
+    assert "打开浏览器" in p and "[0] 文件" in p and "element" in p
 
 
 def test_grounding_prompt_is_the_inference_one():

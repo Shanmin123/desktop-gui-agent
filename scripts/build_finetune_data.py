@@ -7,11 +7,18 @@
 认文字，图标没有编号可指。所以训练样本按两段分别构造：
 
   定位（grounding）  截图 + 元素描述 -> {"bbox_2d": [...]}，来自 Mind2Web
-                     用的提示词和 models.GROUNDING_PROMPT 完全一致
+                     提示词和 models.GROUNDING_PROMPT 完全一致
   动作（action）     截图 + 任务 -> {"thought":..., "action":{...}}，来自 ScreenAgent
-                     让模型直接给归一化坐标，不再依赖元素编号
+                     提示词用生产模板 chain.render_prompt，带元素清单和历史
+  拆解（plan）       截图 + 任务 -> 子任务数组，来自 ScreenAgent 的 PlanAction
+                     提示词和 planner.PLAN_TEMPLATE 完全一致
 
-训练用的提示词必须和推理时一字不差，否则学到的东西迁移不过去。
+训练用的提示词必须和推理时一字不差，否则学到的东西迁移不过去。第一版三处不一致
+（动作用了简化模板、thought 存成空串、定位样本占 70%），动作类型准确率从 42.2%
+掉到 30.6%，原因分析见 docs/第3周实验报告.md。
+
+反思样本（EvaluateSubTaskAction）有 897 条但没有收：其中 875 条标签都是
+sub_task_success，拿它训练只会强化「反思一律报成功」这个已经存在的毛病。
 
 Mind2Web 的截图是整页长图（实测 1280×5429，6.9 MP），远超模型的 1.0 MP 预算，
 整张送进去元素会被压得看不见。这里裁出包含目标的 1280×720 窗口——正好是本项目
@@ -32,8 +39,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from gui_agent.chain import render_prompt
 from gui_agent.models import GROUNDING_PROMPT
-from gui_agent.schema import Action
+from gui_agent.perception import imread
+from gui_agent.planner import MAX_SUBTASKS, PLAN_TEMPLATE
+from gui_agent.schema import Action, Element, ScreenState, Step
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "data" / "finetune"
@@ -42,46 +52,136 @@ CROPS = OUT / "crops"
 VIEW_W, VIEW_H = 1280, 720          # 裁剪窗口，等于本项目的运行分辨率
 MIND2WEB_REPO = "osunlp/Multimodal-Mind2Web"
 
-# 动作阶段的提示词。不给 OCR 元素清单：训练目标就是让模型直接给坐标，
-# 给了清单它又会去用编号。
-ACTION_TEMPLATE = """你在操作一台 Windows 电脑，目标是完成用户给的任务。
-
-任务：{instruction}
-
-看这张截图，输出下一步动作。只返回一个 JSON 对象：
-{{"thought": "为什么这么做", "action": {{"type": "click", "point": [0.5, 0.5]}}}}
-
-可用动作：click / left_double / right_single 需要 point；scroll 需要 point 和
-direction；type 和 hotkey 需要 text；wait / finished / call_user 不需要参数。
-point 是归一化到 0~1 的坐标。"""
-
-
 # --------------------------------------------------------------------------
 # 动作样本：ScreenAgent
 # --------------------------------------------------------------------------
 
 
-def action_samples(split: str) -> list:
-    """ScreenAgent 的可执行动作 -> 训练样本。"""
+def action_samples(split: str, ocr=None) -> list:
+    """ScreenAgent 的可执行动作 -> 训练样本。
+
+    三处和第一版不同，都是照着第一版掉分的原因改的：
+
+    1. 提示词用生产模板（`chain.render_prompt`），带 OCR 元素清单和已执行历史。
+       第一版用的是一个简化模板，训练时没有元素清单，推理时却有，还被要求「优先用
+       element 编号」——模型没学过怎么用编号，于是写出 `14.0` 这种东西。
+    2. `thought` 填人工修正过的说明文字，不再是空串。第一版教模型别写理由，
+       动作类型准确率从 42.2% 掉到 30.6%。
+    3. 一份回复里的多个动作共用同一张截图，按顺序把前面的动作写进历史。
+       不这样做就是同一个输入配几个不同的目标动作，等于教一个矛盾的映射。
+
+    真值点落在某个 OCR 元素里就用 element 编号，否则给 point——提示词要求的就是
+    这个取舍，让模型学会什么时候该用编号。
+    """
     src = ROOT / "data" / "screenagent" / f"{split}.jsonl"
     if not src.is_file():
         raise SystemExit(f"没有 {src}，先跑 scripts/prepare_screenagent.py")
 
+    rows = [json.loads(line) for line in src.open(encoding="utf-8")]
+    out, groups = [], {}
+    for r in rows:
+        if Path(r["image"]).is_file():
+            groups.setdefault((r["session_id"], r["image"]), []).append(r)
+
+    for (_, image), steps_raw in groups.items():
+        img = imread(image)
+        h, w = img.shape[:2]
+        elements = ocr(img, image) if ocr else []
+        state = ScreenState(width=w, height=h, elements=elements)
+        history = []
+        for r in steps_raw:
+            act = dict(r["action"])
+            if act.get("point"):
+                act["point"] = [round(v, 4) for v in act["point"]]
+                eid = element_at(elements, act["point"])
+                if eid is not None:
+                    act = {k: v for k, v in act.items() if k != "point"}
+                    act["element"] = eid
+            # 不带子任务：评测脚本和默认配置（plan=False）都只有整体任务，
+            # 训练时喂子任务就又是一处训练/推理不一致。同一张图上的多个动作靠
+            # 历史区分，不靠子任务。
+            instruction = r["instruction_zh"] or r["instruction"]
+            thought = r.get("thought", "")
+            if not thought:
+                continue  # 没有说明文字的不收，免得和有说明文字的样本教法不一致
+            out.append({
+                "kind": "action",
+                "source": "screenagent",
+                "image": image,
+                "prompt": render_prompt(instruction, state, list(history)),
+                "response": json.dumps({"thought": thought, "action": act},
+                                       ensure_ascii=False),
+            })
+            history.append(Step(state, Action.from_dict(r["action"]), ok=True, changed=True))
+    return out
+
+
+OCR_CACHE = ROOT / "data" / "screenagent" / "_ocr_cache.json"
+
+
+def cached_ocr(ocr):
+    """把 OCR 结果按图片路径缓存到磁盘。
+
+    调配比要重建几次数据，每次为一千来张图重跑 OCR 是 8 分钟白等。
+    """
+    if ocr is None:
+        return None, None
+    cache = json.loads(OCR_CACHE.read_text(encoding="utf-8")) if OCR_CACHE.is_file() else {}
+    stats = {"命中": 0, "新算": 0}
+
+    def run(img, key):
+        if key in cache:
+            stats["命中"] += 1
+            return [Element(**e) for e in cache[key]]
+        els = ocr(img)
+        cache[key] = [{"id": e.id, "bbox": list(e.bbox), "text": e.text,
+                       "source": e.source, "confidence": e.confidence} for e in els]
+        stats["新算"] += 1
+        return els
+
+    def save():
+        OCR_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        OCR_CACHE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        print(f"  OCR 缓存：{stats}，共 {len(cache)} 张")
+
+    return run, save
+
+
+def element_at(elements, point):
+    """真值点落在哪个元素里，返回最小的那个的编号，没有就返回 None。"""
+    x, y = point
+    hit = [e for e in elements
+           if e.bbox[0] <= x <= e.bbox[2] and e.bbox[1] <= y <= e.bbox[3] and e.text.strip()]
+    if not hit:
+        return None
+    return min(hit, key=lambda e: (e.bbox[2] - e.bbox[0]) * (e.bbox[3] - e.bbox[1])).id
+
+
+def plan_samples(split: str) -> list:
+    """ScreenAgent 的 PlanAction 列表 -> 拆解样本，对应 planner.PLAN_TEMPLATE。
+
+    第一版完全没用这批数据。复杂任务实测里拆解会凭空补步骤、也会拆错方向，
+    这是能直接拿数据教的。
+    """
+    src = ROOT / "data" / "screenagent" / "plans.jsonl"
+    if not src.is_file():
+        return []
     out = []
     for line in src.open(encoding="utf-8"):
         r = json.loads(line)
-        if not Path(r["image"]).is_file():
+        if r.get("split") != split or not Path(r["image"]).is_file():
             continue
-        act = dict(r["action"])
-        # 坐标保留四位，够精确又不让回答变长
-        if act.get("point"):
-            act["point"] = [round(v, 4) for v in act["point"]]
+        img = imread(r["image"])
+        h, w = img.shape[:2]
         out.append({
-            "kind": "action",
+            "kind": "plan",
             "source": "screenagent",
             "image": r["image"],
-            "prompt": ACTION_TEMPLATE.format(instruction=r["instruction_zh"] or r["instruction"]),
-            "response": json.dumps({"thought": "", "action": act}, ensure_ascii=False),
+            "prompt": PLAN_TEMPLATE.format(
+                instruction=r["instruction_zh"] or r["instruction"],
+                elements="  （这一步不看元素清单）",
+                max_subtasks=MAX_SUBTASKS),
+            "response": json.dumps(r["subtasks"][:MAX_SUBTASKS], ensure_ascii=False),
         })
     return out
 
@@ -196,15 +296,43 @@ def main() -> None:
                     help="定位样本上限，裁剪图要占硬盘")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--no-grounding", action="store_true", help="只出动作样本")
+    ap.add_argument("--limit-grounding", type=int, default=None,
+                    help="定位样本只留这么多。第一版定位占了 70%%，动作生成被挤掉")
+    ap.add_argument("--no-plan", action="store_true", help="不出拆解样本")
+    ap.add_argument("--no-ocr", action="store_true",
+                    help="动作样本的提示词里不带元素清单。带清单要先跑一遍 OCR")
     args = ap.parse_args()
     random.seed(args.seed)
 
-    train = action_samples("train")
-    val = action_samples("val")
+    ocr = None
+    per = None
+    if not args.no_ocr:
+        from gui_agent.perception import Perception
+
+        print("动作样本的提示词要带元素清单，先跑一遍 OCR ……")
+        per = Perception()
+        per.reader
+        ocr, save_cache = cached_ocr(per.ocr)
+    try:
+        train = action_samples("train", ocr=ocr)
+        val = action_samples("val", ocr=ocr)
+    finally:
+        if per is not None:
+            save_cache()
+            per.close()
     print(f"动作样本（ScreenAgent）：训练 {len(train)}，验证 {len(val)}")
+
+    if not args.no_plan:
+        pt, pv = plan_samples("train"), plan_samples("val")
+        print(f"拆解样本（ScreenAgent）：训练 {len(pt)}，验证 {len(pv)}")
+        train += pt
+        val += pv
 
     if not args.no_grounding:
         g, skip = grounding_samples("train", limit=args.limit_mind2web)
+        if args.limit_grounding is not None:
+            random.shuffle(g)
+            g = g[:args.limit_grounding]
         print(f"定位样本（Mind2Web）：{len(g)}")
         if skip:
             print("  跳过：", dict(skip))

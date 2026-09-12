@@ -2,10 +2,11 @@
 
 对应大纲第 3 周第 2、3 项，第 4 周，第 6 周第 1、2 项。
 
-容错分三层，各管一类问题：
+容错分四层，各管一类问题：
   重试      截图失败、模型吐不出合法 JSON、坐标越界这类单步故障，重来一次往往就过
             （retry_limit，连续失败超过额度才放弃整条任务）
   变化检测  动作执行成功但界面没动，说明点空了，把这件事喂回历史让模型换目标
+  停滞升级  同一个子任务连续被判「方向对但没完成」，升级成重新拆解（stall_limit）
   卡住判定  连续几步重复同一动作且界面一直没变，停下来，不在无效操作上耗完步数
 
 循环结构参考 ScreenAgent 的 Planning-Acting-Reflecting：每一步先看屏幕，再让模型
@@ -30,13 +31,14 @@ from .control import Controller, is_failsafe
 from .monitor import Monitor
 from .perception import screen_changed
 from .planner import REFORMULATE, RETRY, SUCCESS, Planner, acting_instruction
-from .schema import Action, ScreenState, Step, Trajectory
+from .schema import Action, Element, ScreenState, Step, Trajectory
 
 MAX_STEPS = 15
 MAX_ELEMENTS = 60  # 送进提示词的元素上限，太多会挤占上下文
 RESERVED_FOR_UNNAMED = 16  # 上限里留给无文字控件（图标候选框）的名额
 REPEAT_LIMIT = 3   # 同一个动作连续这么多次就停，避免在无效操作上空转
 RETRY_LIMIT = 2    # 连续失败几次还允许重试，超过就放弃整条任务
+STALL_LIMIT = 3    # 同一个子任务连续这么多次判「没完成但方向对」就当原计划走不通
 RETRY_BACKOFF = 0.4  # 重试前等一下，界面动画没停时重截图会拿到中间帧
 
 # 提示词模板在 chain.py，用 LangChain 的 PromptTemplate 管理，两边共用一份
@@ -239,6 +241,7 @@ class Agent:
         monitor: Optional[Monitor] = None,
         retry_limit: int = RETRY_LIMIT,
         retry_backoff: float = RETRY_BACKOFF,
+        stall_limit: int = STALL_LIMIT,
     ) -> None:
         self.perception = perception
         self.controller = controller
@@ -262,6 +265,10 @@ class Agent:
         # 重新截图，失败原因也进了历史，模型有机会换个做法。
         self.retry_limit = retry_limit
         self.retry_backoff = retry_backoff
+        # 同一个子任务上连续判定 need_retry 多少次就升级成重拆。实测复杂任务
+        # copy_between_files 的 16 次反思里 11 次是 need_retry——反思看出来没有
+        # 推进，但没有东西把这件事升级，于是一直重试到步数用光。
+        self.stall_limit = stall_limit
         # 实时记录。不给就用一个只打印不落盘的，Agent 里不用为此加分支。
         self.monitor = monitor if monitor is not None else Monitor(quiet=True)
         self._chain = None
@@ -307,6 +314,7 @@ class Agent:
         planner = Planner(self.vlm) if self.plan else None
         planned = False  # 第一次感知拿到屏幕后才能拆解
         fails = 0        # 连续失败步数，成功一步就清零
+        stalls = 0       # 当前子任务连续判定「没推进」的次数
 
         for _ in range(self.max_steps):
             t0 = time.perf_counter()
@@ -403,6 +411,16 @@ class Agent:
                     situation = RETRY  # 反思失败不该中断任务，当作要重试
                 traj.reflections.append(situation)
                 self.monitor.reflect(situation, planner.current())
+
+                # 连续判「方向对但没完成」够多次，就不能再当重试了
+                if situation == RETRY:
+                    stalls += 1
+                    if stalls >= self.stall_limit:
+                        situation = REFORMULATE
+                        stalls = 0
+                        self.monitor.reflect("连续没推进，升级为重拆", planner.current())
+                else:
+                    stalls = 0
 
                 if situation == SUCCESS:
                     # 只推进子任务，不据此判定整条任务成功。实测反思会连续给出

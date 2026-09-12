@@ -890,3 +890,77 @@ def test_reserve_shrinks_with_a_tiny_budget():
     assert len(shown) == 6
     assert sum(1 for e in shown if e.source == "cv") == 3
     assert sum(1 for e in shown if e.source == "ocr") == 3
+
+
+# --- 停滞升级为重拆（大纲第 6 周第 1、2 项）--------------------------------
+
+
+class PlanningVLM(FakeVLM):
+    """按顺序回答：拆解 -> (动作, 反思) 循环。"""
+
+    def locate(self, image, instruction):
+        return (0.5, 0.5)
+
+
+def test_repeated_need_retry_escalates_to_replan(tmp_path, screen):
+    """反思连着说「没完成但方向对」，不能一直重试下去。
+
+    实测复杂任务 copy_between_files 的 16 次反思里 11 次是 need_retry，
+    反思看出来没推进，但没有东西把它升级，于是一直试到步数用光。
+    """
+    from gui_agent.monitor import Monitor, read_log
+
+    log = tmp_path / "run.jsonl"
+    plan = '["第一步", "第二步"]'
+    act = '{"action": {"type": "wait"}}'
+    retry = '{"situation": "need_retry"}'
+    vlm = PlanningVLM([plan, act, retry, act, retry, act, retry, plan, act,
+                       '{"situation": "sub_task_success"}'])
+    t = Agent(FakePerception(screen), Controller(backend=RecordingBackend(), dry_run=True),
+              vlm, plan=True, detect_change=False, max_steps=5, retry_backoff=0,
+              monitor=Monitor(str(log), quiet=True)).run("x")
+    assert t.reflections[:3] == ["need_retry"] * 3
+    escalated = [r for r in read_log(str(log))
+                 if r["event"] == "reflect" and "升级为重拆" in r["situation"]]
+    assert len(escalated) == 1, "第 3 次 need_retry 应该升级成重拆"
+
+
+def test_no_escalation_below_the_limit(tmp_path, screen):
+    """只连着两次就不该升级，免得刚起步就推翻计划。"""
+    from gui_agent.monitor import Monitor, read_log
+
+    log = tmp_path / "run.jsonl"
+    vlm = PlanningVLM(['["a", "b"]', '{"action": {"type": "wait"}}',
+                       '{"situation": "need_retry"}', '{"action": {"type": "wait"}}',
+                       '{"situation": "need_retry"}', '{"action": {"type": "finished"}}'])
+    Agent(FakePerception(screen), Controller(backend=RecordingBackend(), dry_run=True),
+          vlm, plan=True, detect_change=False, max_steps=4, retry_backoff=0,
+          monitor=Monitor(str(log), quiet=True)).run("x")
+    assert not [r for r in read_log(str(log))
+                if r["event"] == "reflect" and "升级为重拆" in r["situation"]]
+
+
+def test_stall_counter_resets_when_a_subtask_succeeds(screen):
+    """中间推进过就不该累计到升级。"""
+    plan = '["a", "b"]'
+    act = '{"action": {"type": "wait"}}'
+    vlm = PlanningVLM([plan, act, '{"situation": "need_retry"}',
+                       act, '{"situation": "sub_task_success"}',
+                       act, '{"situation": "need_retry"}',
+                       act, '{"situation": "need_retry"}'])
+    a = Agent(FakePerception(screen), Controller(backend=RecordingBackend(), dry_run=True),
+              vlm, plan=True, detect_change=False, max_steps=4, retry_backoff=0)
+    t = a.run("x")
+    # 三次 need_retry 不连续，不该升级（只拆解了一次）
+    assert t.reflections.count("need_retry") >= 2
+
+
+def test_stall_limit_is_configurable(screen):
+    plan = '["a"]'
+    act = '{"action": {"type": "wait"}}'
+    vlm = PlanningVLM([plan] + [act, '{"situation": "need_retry"}'] * 4)
+    a = Agent(FakePerception(screen), Controller(backend=RecordingBackend(), dry_run=True),
+              vlm, plan=True, detect_change=False, max_steps=4, stall_limit=99,
+              retry_backoff=0)
+    t = a.run("x")
+    assert t.reflections == ["need_retry"] * len(t.reflections)

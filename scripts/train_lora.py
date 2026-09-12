@@ -71,6 +71,8 @@ def main() -> None:
     ap.add_argument("--rank", type=int, default=16)
     ap.add_argument("--accum", type=int, default=8, help="梯度累积步数，等效批大小")
     ap.add_argument("--limit", type=int, default=None, help="只用前 N 条，调试用")
+    ap.add_argument("--kinds", default=None,
+                    help="只用这些类型的样本，逗号分隔，如 action,plan。调配比用")
     ap.add_argument("--max-len", type=int, default=2048, help="超长样本直接跳过")
     ap.add_argument("--eval-every", type=int, default=200, help="每多少步在验证集上看一次")
     ap.add_argument("--eval-samples", type=int, default=40)
@@ -90,8 +92,15 @@ def main() -> None:
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    train = load_rows("train", args.limit)
-    val = load_rows("val", args.eval_samples)
+    train = load_rows("train")
+    val = load_rows("val")
+    if args.kinds:
+        want = {k.strip() for k in args.kinds.split(",") if k.strip()}
+        train = [r for r in train if r.get("kind") in want]
+        val = [r for r in val if r.get("kind") in want]
+    if args.limit:
+        train = train[:args.limit]
+    val = val[:args.eval_samples]
     kinds = {}
     for r in train:
         kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1
