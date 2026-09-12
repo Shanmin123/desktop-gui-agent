@@ -60,6 +60,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--adapter", default=None, help="挂上 LoRA 权重评测微调后的模型")
+    ap.add_argument("--max-pixels", type=int, default=1280,
+                    help="图片上限，单位 28x28 的块。微调时降过这个值的话，"
+                         "用同一个值评测才能看出权重本身的效果")
     ap.add_argument("--split", default="val", choices=["train", "val"])
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--tag", default="base")
@@ -75,7 +78,8 @@ def main() -> None:
 
     print(f"加载模型 {args.model} ……")
     t0 = time.perf_counter()
-    vlm = LocalQwenVL(args.model, adapter=args.adapter)
+    vlm = LocalQwenVL(args.model, adapter=args.adapter,
+                      max_pixels=args.max_pixels * 28 * 28)
     print(f"  耗时 {time.perf_counter() - t0:.1f}s")
 
     rows, covs, extras, empty = [], [], [], 0
@@ -104,7 +108,8 @@ def main() -> None:
     out = ROOT / "logs" / f"plan_{args.tag}.json"
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps({
-        "model": args.model, "adapter": args.adapter, "split": args.split, "n": len(recs),
+        "model": args.model, "adapter": args.adapter,
+        "max_pixels": args.max_pixels, "split": args.split, "n": len(recs),
         "coverage_mean": statistics.mean(covs), "coverage_median": statistics.median(covs),
         "extra_steps_mean": statistics.mean(extras), "empty": empty, "rows": rows,
     }, ensure_ascii=False, indent=2), encoding="utf-8")

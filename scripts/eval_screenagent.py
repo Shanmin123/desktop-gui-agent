@@ -61,6 +61,9 @@ def main() -> None:
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--tag", default="base")
     ap.add_argument("--adapter", default=None, help="挂上 LoRA 权重评测微调后的模型")
+    ap.add_argument("--max-pixels", type=int, default=1280,
+                    help="图片上限，单位 28x28 的块。微调时降过这个值的话，"
+                         "用同一个值评测才能看出权重本身的效果")
     ap.add_argument("--no-ocr", action="store_true",
                     help="不跑 OCR，提示词里不带元素清单。默认带，与实际循环一致")
     args = ap.parse_args()
@@ -70,7 +73,8 @@ def main() -> None:
 
     print(f"加载模型 {args.model} ……")
     t0 = time.perf_counter()
-    vlm = LocalQwenVL(args.model, adapter=args.adapter)
+    vlm = LocalQwenVL(args.model, adapter=args.adapter,
+                      max_pixels=args.max_pixels * 28 * 28)
     print(f"  耗时 {time.perf_counter() - t0:.1f}s")
 
     perception = None if args.no_ocr else Perception()
@@ -146,6 +150,7 @@ def main() -> None:
     out.write_text(json.dumps({
         "model": args.model,
         "adapter": args.adapter,
+        "max_pixels": args.max_pixels,
         "n": n,
         "with_ocr": not args.no_ocr,
         "type_accuracy": n_type_ok / n,

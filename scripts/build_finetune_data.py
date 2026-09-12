@@ -58,7 +58,23 @@ MIND2WEB_REPO = "osunlp/Multimodal-Mind2Web"
 # --------------------------------------------------------------------------
 
 
-def action_samples(split: str, ocr=None) -> list:
+# 训练样本的长度预算。动作样本的元素清单占大头，中位 2030 token；显存占满之后
+# 每次更新从 33 s 涨到 130 s，所以按这个预算裁清单条数，而不是丢掉超长样本——
+# 丢掉就等于只拿文字稀疏的界面训练。
+TOKEN_BUDGET = 1900
+ELEMENT_STEPS = (60, 45, 30, 20, 12, 6, 0)
+
+
+def fit_prompt(instruction, state, history, count_tokens) -> tuple:
+    """在长度预算内尽量多列元素，返回 (提示词, 用了多少条元素)。"""
+    for limit in ELEMENT_STEPS:
+        prompt = render_prompt(instruction, state, history, elements_limit=limit)
+        if count_tokens is None or count_tokens(prompt) <= TOKEN_BUDGET:
+            return prompt, limit
+    return prompt, ELEMENT_STEPS[-1]
+
+
+def action_samples(split: str, ocr=None, count_tokens=None) -> list:
     """ScreenAgent 的可执行动作 -> 训练样本。
 
     三处和第一版不同，都是照着第一版掉分的原因改的：
@@ -108,11 +124,13 @@ def action_samples(split: str, ocr=None) -> list:
             thought = r.get("thought", "")
             if not thought:
                 continue  # 没有说明文字的不收，免得和有说明文字的样本教法不一致
+            prompt, used = fit_prompt(instruction, state, list(history), count_tokens)
             out.append({
                 "kind": "action",
                 "source": "screenagent",
                 "image": image,
-                "prompt": render_prompt(instruction, state, list(history)),
+                "elements_shown": used,
+                "prompt": prompt,
                 "response": json.dumps({"thought": thought, "action": act},
                                        ensure_ascii=False),
             })
@@ -317,9 +335,16 @@ def main() -> None:
         per = Perception()
         per.reader
         ocr, save_cache = cached_ocr(per.ocr)
+    count_tokens = None
+    if not args.no_ocr:
+        from transformers import AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-VL-3B-Instruct")
+        # 图片那部分 token 另算，预算留给文本
+        count_tokens = lambda s: len(tok(s)["input_ids"])
     try:
-        train = action_samples("train", ocr=ocr)
-        val = action_samples("val", ocr=ocr)
+        train = action_samples("train", ocr=ocr, count_tokens=count_tokens)
+        val = action_samples("val", ocr=ocr, count_tokens=count_tokens)
     finally:
         if per is not None:
             save_cache()

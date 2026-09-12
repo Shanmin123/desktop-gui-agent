@@ -157,3 +157,50 @@ def test_limit_is_respected(monkeypatch, tmp_path):
     (tmp_path / "train.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
     monkeypatch.setattr(train_lora, "DATA", tmp_path)
     assert len(load_rows("train", limit=2)) == 2
+
+
+# --- 按长度分桶 -------------------------------------------------------------
+
+
+def _rows(lengths):
+    return [{"prompt": "x" * n, "response": "", "kind": "action"} for n in lengths]
+
+
+def test_sortish_batches_keeps_every_sample():
+    import random
+
+    from train_lora import sortish_batches
+
+    rows = _rows([10, 500, 30, 2000, 70, 1200, 90, 300])
+    out = sortish_batches(rows, 4, random.Random(0))
+    assert len(out) == len(rows)
+    assert sorted(len(r["prompt"]) for r in out) == sorted(len(r["prompt"]) for r in rows)
+
+
+def test_sortish_batches_makes_each_batch_length_homogeneous():
+    """一批里长度要接近，否则显存碎片攒得快。"""
+    import random
+
+    from train_lora import sortish_batches
+
+    rows = _rows(list(range(0, 3200, 100)))   # 32 条，长度 0~3100
+    out = sortish_batches(rows, 4, random.Random(1))
+    spreads = []
+    for i in range(0, len(out), 4):
+        ls = [len(r["prompt"]) for r in out[i:i + 4]]
+        spreads.append(max(ls) - min(ls))
+    # 每批内部跨度不超过 3 个刻度（300），而整体跨度是 3100
+    assert max(spreads) <= 300, spreads
+
+
+def test_sortish_batches_shuffles_batch_order():
+    """批之间要乱序，不然就是先练短样本再练长样本。"""
+    import random
+
+    from train_lora import sortish_batches
+
+    rows = _rows(list(range(0, 800, 10)))
+    a = [len(r["prompt"]) for r in sortish_batches(rows, 4, random.Random(0))]
+    b = [len(r["prompt"]) for r in sortish_batches(rows, 4, random.Random(7))]
+    assert a != b, "两个不同种子应给出不同的批顺序"
+    assert a != sorted(a), "不能是整体升序"

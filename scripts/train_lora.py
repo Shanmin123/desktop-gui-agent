@@ -40,6 +40,19 @@ def load_rows(split: str, limit=None) -> list:
     return rows[:limit] if limit else rows
 
 
+def sortish_batches(rows: list, accum: int, rng) -> list:
+    """按长度排好再切成一批批，然后打乱批的顺序。
+
+    样本长度差一倍多（定位约 1300 token、动作到 2800），一次更新里混着长短样本时
+    缓存分配器的碎片攒得很快，整卡占满之后要么变慢要么停住。同一批里长度接近，
+    显存块能反复复用。批之间的顺序仍然是随机的，不会退化成「先练定位再练动作」。
+    """
+    order = sorted(rows, key=lambda r: len(r["prompt"]) + len(r["response"]))
+    batches = [order[i:i + accum] for i in range(0, len(order), accum)]
+    rng.shuffle(batches)
+    return [r for b in batches for r in b]
+
+
 def encode(processor, row: dict, max_len: int):
     """一条样本 -> (inputs, labels)，labels 只在回答部分有效。"""
     from PIL import Image
@@ -74,6 +87,13 @@ def main() -> None:
     ap.add_argument("--kinds", default=None,
                     help="只用这些类型的样本，逗号分隔，如 action,plan。调配比用")
     ap.add_argument("--max-len", type=int, default=2048, help="超长样本直接跳过")
+    ap.add_argument("--max-pixels", type=int, default=1280,
+                    help="送进模型的图片上限，单位是 28x28 的块。1024x768 的截图在"
+                         "默认 1280 下展开成 1004 个 token，是样本长度的大头")
+    ap.add_argument("--mem-fraction", type=float, default=0.8,
+                    help="限制本进程能用的显存比例。Windows 的 WDDM 在显存超额时会"
+                         "静默换页到主机内存，不报 OOM 只是慢几百倍——限住之后直接"
+                         "抛 OOM，问题当场可见")
     ap.add_argument("--eval-every", type=int, default=200, help="每多少步在验证集上看一次")
     ap.add_argument("--eval-samples", type=int, default=40)
     ap.add_argument("--save-every", type=int, default=20,
@@ -91,6 +111,8 @@ def main() -> None:
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
+    if args.mem_fraction and torch.cuda.is_available():
+        torch.cuda.set_per_process_memory_fraction(args.mem_fraction)
 
     train = load_rows("train")
     val = load_rows("val")
@@ -118,7 +140,7 @@ def main() -> None:
         kwargs["dtype"] = torch.bfloat16
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model, **kwargs)
     processor = AutoProcessor.from_pretrained(
-        args.model, min_pixels=256 * 28 * 28, max_pixels=1280 * 28 * 28)
+        args.model, min_pixels=256 * 28 * 28, max_pixels=args.max_pixels * 28 * 28)
     print(f"  耗时 {time.perf_counter() - t0:.1f}s，"
           f"显存 {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
 
@@ -172,8 +194,7 @@ def main() -> None:
     t_start = time.perf_counter()
 
     for epoch in range(args.epochs):
-        random.shuffle(train)
-        for r in train:
+        for r in sortish_batches(train, args.accum, random):
             b = encode(processor, r, args.max_len)
             if b is None:
                 skipped += 1
@@ -202,10 +223,10 @@ def main() -> None:
                     log["steps"][-1]["val_loss"] = round(v, 4)
                 if args.save_every and step % args.save_every == 0:
                     save(step, log, t_start, skipped)
-                    # 顺手把缓存分配器占着不用的块还回去。分配器只涨不缩，样本尺寸
-                    # 不一，碎片会越攒越多；两次训练都是整卡占满之后停在 backward 里
-                    # 空转（利用率 100% 但显存控制器 3%、功耗 55 W），而峰值分配量
-                    # 只有 6.21 GB。
+                    # 顺手把分配器占着不用的块还回去：样本长度差一倍多，碎片攒得快，
+                    # 整卡占满之后会明显变慢。不要放到每次更新——4-bit 每次前向都要
+                    # 反量化权重，每步清缓存会把那些临时缓冲区反复重分配，实测每次
+                    # 更新从 36 s 涨到 100 s 以上。
                     torch.cuda.empty_cache()
 
     log["final_val_loss"] = round(evaluate(), 4)

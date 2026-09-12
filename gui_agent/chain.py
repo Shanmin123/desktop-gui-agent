@@ -133,9 +133,13 @@ class ActionOutputParser(BaseOutputParser):
 
 
 def render_prompt(instruction: str, state: ScreenState, steps: List[Step],
-                  variant: str = "base") -> str:
-    """套用模板生成一步的提示词。variant 选提示词变体，见 PROMPT_VARIANTS。"""
-    from .agent import format_elements, format_history
+                  variant: str = "base", elements_limit: Optional[int] = None) -> str:
+    """套用模板生成一步的提示词。
+
+    variant 选提示词变体，见 PROMPT_VARIANTS。elements_limit 限制元素清单的条数，
+    不给就用 agent.MAX_ELEMENTS；构建微调样本时用它把超长样本压进长度预算。
+    """
+    from .agent import MAX_ELEMENTS, format_elements, format_history
 
     if variant not in PROMPT_VARIANTS:
         raise ValueError(f"没有 {variant!r} 这个提示词变体，可选 {list(PROMPT_VARIANTS)}")
@@ -144,7 +148,8 @@ def render_prompt(instruction: str, state: ScreenState, steps: List[Step],
     return prompt.format(
         instruction=instruction,
         history=format_history(steps),
-        elements=format_elements(state),
+        elements=format_elements(state, MAX_ELEMENTS if elements_limit is None
+                                else elements_limit),
     )
 
 
