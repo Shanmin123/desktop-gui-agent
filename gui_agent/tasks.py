@@ -182,8 +182,13 @@ def _check_open_browser(before: Dict) -> bool:
     只看进程会误判：浏览器持续起后台辅助进程（更新程序、渲染器），任何一个新 PID
     都会让验收通过。实测 Agent 只输出了一个 call_user、一次点击都没有，按进程判定
     却算通过。真正打开浏览器一定会有新的顶层窗口，两个条件都要满足。
+
+    两个条件都先算出来再判，不写成 `and` 短路：短路的话 before 缺了 titles 这个键
+    只在「恰好没有新进程」时才不报错，缺键变成看浏览器起没起后台进程的运气。
     """
-    return bool(browser_pids() - before["pids"]) and bool(window_titles() - before["titles"])
+    new_process = bool(browser_pids() - before["pids"])
+    new_window = bool(window_titles() - before["titles"])
+    return new_process and new_window
 
 
 def _check_close_app(before: Dict) -> bool:

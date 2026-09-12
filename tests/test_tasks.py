@@ -61,12 +61,15 @@ def test_message_task_is_substituted():
 
 
 def test_open_browser_check_needs_a_new_process():
-    """浏览器本来就开着时不能算通过，这是 dry-run 里暴露过的问题。"""
-    t = next(x for x in basic_tasks() if x.id == "open_browser")
-    from gui_agent.tasks import browser_pids
+    """浏览器本来就开着时不能算通过，这是 dry-run 里暴露过的问题。
 
-    baseline = {"pids": browser_pids()}   # 快照就是当前状态
-    assert t.check(baseline) is False     # 没有新进程，必须判不通过
+    基线用任务自己的 setup() 拿，和实际运行时一致。手写 {"pids": ...} 会少一个
+    titles 键，而验收里读 titles 那一步只在「有新进程」时才走到——浏览器随时在起
+    渲染进程，这条测试就会时过时不过。
+    """
+    t = next(x for x in basic_tasks() if x.id == "open_browser")
+    baseline = t.setup()                  # 快照就是当前状态，两个键都有
+    assert t.check(baseline) is False     # 没有新窗口，必须判不通过
 
 
 def test_search_check_ignores_preexisting_titles():
@@ -283,3 +286,19 @@ def test_open_two_apps_needs_a_new_window(monkeypatch):
     monkeypatch.setattr(T, "pids_of", lambda name: {"2", "4"})
     monkeypatch.setattr(T, "window_titles", lambda: {"旧窗口"})
     assert T._check_open_two_apps(before) is False
+
+
+def test_open_browser_check_reports_a_missing_baseline_key_every_time():
+    """基线缺键要稳定报错，不能取决于浏览器有没有正好起新进程。
+
+    原来验收写成 `有新进程 and 有新窗口`，短路让缺 titles 这件事时隐时现，
+    表现就是这个文件里有一条测试偶发失败。
+    """
+    import pytest
+
+    from gui_agent.tasks import _check_open_browser
+
+    with pytest.raises(KeyError):
+        _check_open_browser({"pids": set()})          # 缺 titles
+    with pytest.raises(KeyError):
+        _check_open_browser({"titles": set()})        # 缺 pids
