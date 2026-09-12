@@ -867,3 +867,26 @@ def test_elements_with_no_text_and_no_cv_source_are_skipped():
         Element(id=1, bbox=(0.3, 0.3, 0.4, 0.4), text="保存", source="ocr"),
     ])
     assert [e.id for e in select_elements(state)] == [1]
+
+
+def test_reserve_holds_even_when_text_almost_fills_the_budget():
+    """名额是保证值：文字 59 个也要让出 16 个位置。
+
+    写成「文字占满才腾位置」的话，59 个文字只会给图标框留 1 个位置，
+    334 条上这一档就是 83.8% 和 83.5% 的差别。
+    """
+    from gui_agent.agent import RESERVED_FOR_UNNAMED, select_elements
+
+    shown = select_elements(_crowd(59, 20), limit=60)
+    assert sum(1 for e in shown if e.source == "cv") == RESERVED_FOR_UNNAMED
+    assert len(shown) == 60
+
+
+def test_reserve_shrinks_with_a_tiny_budget():
+    """名额不超过一半，否则 limit 很小的时候文字会被挤干净。"""
+    from gui_agent.agent import select_elements
+
+    shown = select_elements(_crowd(70, 20), limit=6)
+    assert len(shown) == 6
+    assert sum(1 for e in shown if e.source == "cv") == 3
+    assert sum(1 for e in shown if e.source == "ocr") == 3

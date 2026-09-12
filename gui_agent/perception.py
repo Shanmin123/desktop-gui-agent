@@ -116,6 +116,13 @@ CV_MIN_SIDE = 10        # 像素，比这更小的外接框基本是噪点
 CV_MAX_SIDE_FRAC = 0.12  # 边长超过短边这个比例就不像图标了
 CV_MAX_ELEMENTS = 80
 CV_DEDUP_IOU = 0.3      # 和某个 OCR 框重叠超过这个值，就认定它是文字，不重复收
+CV_TYPICAL_SIDE = 0.025  # 归一化边长，1280 宽的屏幕上约 32 px，桌面图标的常见尺寸
+
+
+def _icon_likeness(bbox) -> float:
+    """越小越像图标。按长边偏离典型图标尺寸的程度排。"""
+    x1, y1, x2, y2 = bbox
+    return abs(max(x2 - x1, y2 - y1) - CV_TYPICAL_SIDE)
 
 
 def detect_cv_elements(img: np.ndarray, max_elements: int = CV_MAX_ELEMENTS) -> List[Element]:
@@ -125,8 +132,9 @@ def detect_cv_elements(img: np.ndarray, max_elements: int = CV_MAX_ELEMENTS) -> 
     低的时候，根因就在这。这里补一批候选框：边缘检测 -> 闭运算把图标的笔画连成
     一块 -> 取外接矩形 -> 按尺寸和长宽比筛掉分割线、大面板和噪点。
 
-    返回的元素没有文字，按面积从大到小排，坐标同样归一化。实测 6 ms 一张，
-    相对 OCR 的几百毫秒可以忽略。
+    返回的元素没有文字，坐标归一化，按「长边接近典型图标尺寸」排序——提示词里
+    装不下所有框，排在前面的才有机会被看到。实测 6 ms 一张，相对 OCR 的几百毫秒
+    可以忽略。
     """
     h, w = img.shape[:2]
     if h < 2 or w < 2:
@@ -159,15 +167,6 @@ def detect_cv_elements(img: np.ndarray, max_elements: int = CV_MAX_ELEMENTS) -> 
         Element(id=i, bbox=b, text="", source="cv", confidence=0.0)
         for i, b in enumerate(kept)
     ]
-
-
-CV_TYPICAL_SIDE = 0.025  # 归一化边长，1280 宽的屏幕上约 32 px，桌面图标的常见尺寸
-
-
-def _icon_likeness(bbox) -> float:
-    """越小越像图标。按长边偏离典型图标尺寸的程度排。"""
-    x1, y1, x2, y2 = bbox
-    return abs(max(x2 - x1, y2 - y1) - CV_TYPICAL_SIDE)
 
 
 def _iou(a, b) -> float:

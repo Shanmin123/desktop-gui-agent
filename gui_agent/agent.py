@@ -57,8 +57,11 @@ def select_elements(state: ScreenState, limit: int = MAX_ELEMENTS,
     named = [e for e in state.elements if e.text.strip()]
     unnamed = [e for e in state.elements if not e.text.strip() and e.source == "cv"]
 
-    # 文字元素占不满上限时，图标框能进多少进多少；占满了就按名额挤出位置
-    keep_unnamed = unnamed[:max(0, limit - len(named))] or unnamed[:min(reserved, limit)]
+    # 名额是保证值不是上限：文字元素多到占满时也要给图标框留出 reserved 个，
+    # 文字占不满时剩下的位置也归图标框。名额本身不超过一半，否则 limit 很小的时候
+    # 文字会被挤干净。
+    room = max(min(reserved, limit // 2), limit - len(named))
+    keep_unnamed = unnamed[:min(room, limit)]
     return named[:limit - len(keep_unnamed)] + keep_unnamed
 
 

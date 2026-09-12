@@ -23,6 +23,7 @@
 import argparse
 import json
 import math
+from collections import Counter
 import statistics
 import sys
 import time
@@ -98,6 +99,8 @@ def main() -> None:
         variant, with_elements = CONFIGS[name]
         n_ok = n_fail = kb_total = kb_hit = 0
         dists, latencies = [], []
+        # 只看总准确率看不出变体把预测往哪一类推了，混淆和预测分布都记下来
+        confusion, pred_types = Counter(), Counter()
 
         for i, r in enumerate(recs):
             gt = r["action"]
@@ -119,6 +122,8 @@ def main() -> None:
                 n_fail += 1
                 continue
 
+            confusion[f'{gt["type"]}->{pred.type}'] += 1
+            pred_types[pred.type] += 1
             n_ok += pred.type == gt["type"]
             if gt["type"] in KEYBOARD:
                 kb_total += 1
@@ -141,6 +146,9 @@ def main() -> None:
             "n_pointed_pairs": len(dists),
             "parse_failures": n_fail,
             "sec_per_sample": sum(latencies) / len(latencies),
+            "pred_types": dict(pred_types.most_common()),
+            "gt_types": dict(Counter(r["action"]["type"] for r in recs).most_common()),
+            "confusion": dict(confusion.most_common()),
         }
         r = results[name]
         print(f"[{name}] 类型 {r['type_accuracy']:.1%}  "
