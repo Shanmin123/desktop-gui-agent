@@ -8,8 +8,8 @@
   命中    识别出的元素里，有没有哪个的中心落在真值框内
           —— 有，模型就能按编号点到它；没有，模型再聪明也指不了
 
-  前 60   同上，但只算送进提示词的前 60 个（format_elements 的上限）
-          识别得多不等于用得上，排在 60 名以后的元素模型根本看不到
+  清单内  同上，但只算真正会写进提示词的那批（select_elements 选出来的，上限 60）
+          识别得多不等于用得上，进不了清单的元素模型根本看不到
 
   元素数  平均识别出多少个元素，反映提示词被占掉多少
   耗时    每张图的感知秒数
@@ -33,8 +33,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
-from gui_agent.agent import MAX_ELEMENTS
+from gui_agent.agent import MAX_ELEMENTS, select_elements
 from gui_agent.perception import Perception, detect_cv_elements, merge_elements
+from gui_agent.schema import ScreenState
 
 ROOT = Path(__file__).resolve().parents[1]
 TEST_JSONL = ROOT / "data" / "grounding" / "test.jsonl"
@@ -114,7 +115,11 @@ def main() -> None:
             counts.append(len(elements))
 
             ok = covers(elements, r["bbox"])
-            ok60 = covers(elements[:MAX_ELEMENTS], r["bbox"])
+            # 量的是提示词真正会显示的那批，不是简单截前 60 个：
+            # select_elements 会给图标候选框留名额
+            shown = select_elements(ScreenState(width=1, height=1, elements=elements),
+                                   MAX_ELEMENTS)
+            ok60 = covers(shown, r["bbox"])
             for key in ("总体", r["element_type"]):
                 s = stats[key]
                 s[0] += ok
@@ -132,13 +137,13 @@ def main() -> None:
             "elements_per_image": sum(counts) / len(counts),
         }
         g = results[name]["groups"]["总体"]
-        print(f"[{name}] 命中 {g['hit']/g['n']:.1%}  前60 {g['hit_top60']/g['n']:.1%}  "
+        print(f"[{name}] 命中 {g['hit']/g['n']:.1%}  清单内 {g['hit_top60']/g['n']:.1%}  "
               f"{results[name]['sec_per_image']:.2f}s/张  "
               f"{results[name]['elements_per_image']:.0f} 元素/张\n")
 
     per.close()
 
-    print(f"\n{'配置':<10}{'总体':<9}{'文字':<9}{'图标':<9}{'前60':<9}{'元素数':<8}耗时")
+    print(f"\n{'配置':<10}{'总体':<9}{'文字':<9}{'图标':<9}{'清单内':<9}{'元素数':<8}耗时")
     for name in names:
         r = results[name]
         g = r["groups"]

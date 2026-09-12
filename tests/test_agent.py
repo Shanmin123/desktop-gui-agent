@@ -792,3 +792,78 @@ def test_non_integral_element_id_still_rejected(screen, eid):
     """1.9 取整会变成 1，点到别的控件上，这类必须继续拒掉。"""
     with pytest.raises(ValueError, match="不是整数"):
         parse_step('{"action": {"type": "click", "element": %s}}' % eid, screen)
+
+
+# --- 给图标候选框留名额（大纲第 6 周第 3 项）--------------------------------
+
+
+def _crowd(n_text, n_icon):
+    els = [Element(id=i, bbox=(0.1, i / 500, 0.2, i / 500 + 0.005), text=f"文字{i}")
+           for i in range(n_text)]
+    els += [Element(id=n_text + i, bbox=(0.5, i / 200, 0.52, i / 200 + 0.02),
+                    text="", source="cv") for i in range(n_icon)]
+    return ScreenState(1280, 720, elements=els)
+
+
+def test_icons_get_reserved_slots_when_text_would_fill_them():
+    """文字密集的界面上，OCR 不能把图标框全挤出去。"""
+    from gui_agent.agent import RESERVED_FOR_UNNAMED, select_elements
+
+    shown = select_elements(_crowd(70, 20), limit=60)
+    assert len(shown) == 60
+    assert sum(1 for e in shown if e.source == "cv") == RESERVED_FOR_UNNAMED
+
+
+def test_text_keeps_the_rest_of_the_budget():
+    from gui_agent.agent import select_elements
+
+    shown = select_elements(_crowd(70, 20), limit=60)
+    assert sum(1 for e in shown if e.source == "ocr") == 44
+
+
+def test_no_icons_means_text_uses_the_whole_budget():
+    from gui_agent.agent import select_elements
+
+    assert len(select_elements(_crowd(70, 0), limit=60)) == 60
+
+
+def test_few_elements_are_all_shown():
+    from gui_agent.agent import select_elements
+
+    assert len(select_elements(_crowd(3, 3), limit=60)) == 6
+
+
+def test_icons_take_leftover_space_before_touching_the_reserve():
+    """文字只有 10 个时，20 个图标框该进 20 个，不是只进 16 个。"""
+    from gui_agent.agent import select_elements
+
+    shown = select_elements(_crowd(10, 20), limit=60)
+    assert sum(1 for e in shown if e.source == "cv") == 20
+
+
+def test_reservation_never_exceeds_the_limit():
+    from gui_agent.agent import select_elements
+
+    for limit in (1, 5, 16, 17, 60):
+        assert len(select_elements(_crowd(70, 20), limit=limit)) <= limit
+
+
+def test_selected_ids_are_unchanged():
+    """选择只决定显示哪些，不能改编号——编号是模型用来指元素的。"""
+    from gui_agent.agent import select_elements
+
+    state = _crowd(70, 20)
+    shown = select_elements(state, limit=60)
+    by_id = {e.id: e for e in state.elements}
+    for e in shown:
+        assert by_id[e.id].bbox == e.bbox
+
+
+def test_elements_with_no_text_and_no_cv_source_are_skipped():
+    from gui_agent.agent import select_elements
+
+    state = ScreenState(1280, 720, elements=[
+        Element(id=0, bbox=(0.1, 0.1, 0.2, 0.2), text="  ", source="ocr"),
+        Element(id=1, bbox=(0.3, 0.3, 0.4, 0.4), text="保存", source="ocr"),
+    ])
+    assert [e.id for e in select_elements(state)] == [1]

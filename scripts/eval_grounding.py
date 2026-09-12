@@ -73,6 +73,7 @@ def main() -> None:
 
     stats = defaultdict(lambda: [0, 0])  # key -> [命中, 总数]
     latencies, failures, n_unparsed = [], [], 0
+    preds = []  # 每条的预测点，存下来才能离线试「把点吸附到检测出的控件上」
 
     for i, r in enumerate(recs):
         img = np.array(ds[r["index"]]["image"].convert("RGB"))[:, :, ::-1]  # RGB->BGR
@@ -87,6 +88,10 @@ def main() -> None:
         for key in ("总体", r["platform"], r["element_type"]):
             stats[key][1] += 1
             stats[key][0] += ok
+
+        preds.append({"index": r["index"], "element_type": r["element_type"],
+                      "platform": r["platform"], "bbox": r["bbox"],
+                      "point": list(pred) if pred else None, "hit": bool(ok)})
 
         if not ok and len(failures) < args.save_fail:
             failures.append((r, pred, img))
@@ -113,6 +118,7 @@ def main() -> None:
                 "accuracy": {k: {"hit": v[0], "total": v[1]} for k, v in stats.items()},
                 "avg_latency_s": sum(latencies) / len(latencies),
                 "unparsed": n_unparsed,
+                "preds": preds,
             },
             ensure_ascii=False,
             indent=2,

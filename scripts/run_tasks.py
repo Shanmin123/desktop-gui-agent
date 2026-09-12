@@ -91,6 +91,11 @@ def main() -> None:
     if args.inject_failures:
         vlm = FlakyVLM(vlm, rate=args.inject_failures)
         print(f"故障注入开启：{args.inject_failures:.0%} 的模型输出会被换成不可解析的文本")
+    if args.cv_elements and args.locate_target and not args.plan:
+        # 两段式定位的提示词里没有元素清单，那条路径根本不跑 OCR，候选框生成了也没人看。
+        # 不提示的话这个开关是静默失效的——第 3 周的实验就这么白开了一轮。
+        print("注意：--cv-elements 配合 --locate-target 不起作用，两段式不看元素清单。"
+              "要用候选框就去掉 --locate-target，或者加 --plan（拆解那一步会看清单）。\n")
     perception = Perception(cache_ocr=args.cache_ocr,
                             cv_elements=args.cv_elements)
     controller = Controller(backend=PyAutoGUIBackend(), dry_run=not args.live)

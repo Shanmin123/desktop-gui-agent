@@ -413,3 +413,15 @@ def test_reflect_example_does_not_name_a_real_situation():
     head = REFLECT_TEMPLATE.template.split("situation 三选一")[0]
     for s in SITUATIONS:
         assert s not in head, f"格式示例里不该出现具体取值 {s}"
+
+
+# --- 不要补任务没要求的步骤 -------------------------------------------------
+
+
+def test_plan_prompt_forbids_inventing_folder_steps():
+    """实测模型看到路径里有 logs/scratch 就自己加了三步建文件夹，那些目录本来就在。"""
+    from gui_agent.planner import PLAN_TEMPLATE
+
+    tpl = PLAN_TEMPLATE.format(instruction="x", elements="  （无）", max_subtasks=7)
+    assert "文件夹都已经存在" in tpl
+    assert "新建文件夹" in tpl  # 明确点出不要补的那类步骤

@@ -80,6 +80,11 @@ _KEYBOARD_RULE = _POSITION_RULE + """
 能用快捷键完成的就别去点菜单：保存 ctrl+s、全选 ctrl+a、复制粘贴 ctrl+c / ctrl+v、
 新建 ctrl+n、关闭 ctrl+w。要输入文字用 type，不要一个字一个字点。"""
 
+_CLICK_RULE = _POSITION_RULE + """
+
+绝大多数控件是单击：按钮、菜单、标签页、输入框、工具栏图标、链接，都用 click。
+只有打开文件、文件夹、桌面图标才用 left_double。不确定就用 click。"""
+
 _EXAMPLES = """
 两个例子（只是示范格式，和当前任务无关）：
 任务「保存文件」，屏幕上没有可见的保存按钮 ->
@@ -100,6 +105,9 @@ PROMPT_VARIANTS = {
     "base": TEMPLATE,
     "point_first": _variant(_POSITION_RULE, _POINT_FIRST_RULE),
     "keyboard": _variant(_POSITION_RULE, _KEYBOARD_RULE),
+    # 第 3 周复杂任务实测：4 条任务 56 步里 47 步是 left_double，模型一律双击。
+    # 离线也有：ScreenAgent 353 条里 click 被答成 left_double 33 次。
+    "click_prior": _variant(_POSITION_RULE, _CLICK_RULE),
     "few_shot": _variant("\n任务：{instruction}", _EXAMPLES + "\n任务：{instruction}"),
 }
 

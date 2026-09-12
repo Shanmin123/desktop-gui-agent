@@ -48,7 +48,10 @@ PLAN_TEMPLATE = PromptTemplate.from_template(
 
 针对上面这个任务，只返回一个 JSON 数组，不要有别的内容，每项一句话，
 最多 {max_subtasks} 个。子任务描述要具体到界面上的控件，不要写「完成任务」
-这种没有对应操作的句子。"""
+这种没有对应操作的句子。
+
+只拆任务里写明要做的事。任务里出现的文件路径，其中的文件夹都已经存在，
+不要补「新建文件夹」「重命名文件夹」这类任务没有要求的步骤。"""
 )
 
 REFLECT_TEMPLATE = PromptTemplate.from_template(
