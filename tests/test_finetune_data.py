@@ -173,3 +173,65 @@ def test_action_samples_carry_valid_actions():
         if n >= 300:
             break
     assert n > 0
+
+
+# --- 定位目标必须写在模型的坐标空间里 ---------------------------------------
+
+
+def test_to_model_space_scales_box_like_smart_resize():
+    """推理时预测框是除以 smart_resize 后的尺寸来归一化的，训练目标得在同一空间。
+
+    1280x720 在 --max-pixels 640 下被缩到 924x504（0.722 倍），目标框不跟着缩
+    就整体大了 39%，ScreenSpot 从 71.6% 掉到 30.2%。
+    """
+    from qwen_vl_utils.vision_process import smart_resize
+
+    from build_finetune_data import to_model_space
+
+    for blocks in (640, 1280):
+        rh, rw = smart_resize(720, 1280, factor=28,
+                              min_pixels=256 * 28 * 28, max_pixels=blocks * 28 * 28)
+        box = to_model_space([0.0, 0.0, 1280.0, 720.0], 1280, 720, blocks)
+        assert box == pytest.approx([0.0, 0.0, rw, rh])
+
+
+def test_to_model_space_keeps_the_box_inside_the_resized_image():
+    from qwen_vl_utils.vision_process import smart_resize
+
+    from build_finetune_data import to_model_space
+
+    rh, rw = smart_resize(720, 1280, factor=28,
+                          min_pixels=256 * 28 * 28, max_pixels=640 * 28 * 28)
+    x1, y1, x2, y2 = to_model_space([100.0, 50.0, 300.0, 90.0], 1280, 720, 640)
+    assert 0 <= x1 < x2 <= rw and 0 <= y1 < y2 <= rh
+
+
+def test_built_grounding_boxes_are_in_model_space():
+    """落盘的定位样本，框不能超出 smart_resize 后的尺寸。"""
+    from pathlib import Path as _P
+
+    from qwen_vl_utils.vision_process import smart_resize
+    from PIL import Image
+
+    p = _P(__file__).resolve().parents[1] / "data" / "finetune" / "train.jsonl"
+    if not p.is_file():
+        pytest.skip("还没构建微调数据")
+    n = 0
+    for line in p.open(encoding="utf-8"):
+        r = json.loads(line)
+        if r["kind"] != "grounding":
+            continue
+        with Image.open(r["image"]) as im:
+            w, h = im.size
+        b = json.loads(r["response"])["bbox_2d"]
+        ok = False
+        for blocks in (640, 1280):
+            rh, rw = smart_resize(h, w, factor=28, min_pixels=256 * 28 * 28,
+                                  max_pixels=blocks * 28 * 28)
+            if b[2] <= rw + 1 and b[3] <= rh + 1:
+                ok = True
+                break
+        assert ok, f"框 {b} 超出了任何一档 max_pixels 下的尺寸（图 {w}x{h}）"
+        n += 1
+        if n >= 80:
+            break

@@ -249,6 +249,24 @@ def describe(repr_str: str, attrs: dict) -> str:
     return s
 
 
+def to_model_space(box, w: int, h: int, max_pixels_blocks: int) -> list:
+    """把裁剪图里的像素框换到模型实际看到的坐标空间。
+
+    推理时 `models.locate` 是拿预测框除以 `smart_resize` 后的尺寸来归一化的，
+    所以训练目标也必须写在那个空间里。不换的话：1280x720 的裁剪图在
+    --max-pixels 640 下被缩到 924x504（0.722 倍），而目标框还是 1280x720 里的
+    数值，模型学到的坐标整体大了 39%，ScreenSpot 上从 71.6% 掉到 30.2%。
+    1280 上限下 smart_resize 也会把边长凑成 28 的倍数（1280x720 -> 1288x728），
+    有 0.6% 的偏差，一并修掉。
+    """
+    from qwen_vl_utils.vision_process import smart_resize
+
+    rh, rw = smart_resize(h, w, factor=28,
+                          min_pixels=256 * 28 * 28, max_pixels=max_pixels_blocks * 28 * 28)
+    sx, sy = rw / w, rh / h
+    return [box[0] * sx, box[1] * sy, box[2] * sx, box[3] * sy]
+
+
 def crop_box(bx: float, by: float, bw: float, bh: float, W: int, H: int) -> tuple:
     """裁一个 VIEW_W×VIEW_H 的窗口，尽量把目标放在中间且不越界。"""
     cx, cy = bx + bw / 2, by + bh / 2
@@ -257,7 +275,8 @@ def crop_box(bx: float, by: float, bw: float, bh: float, W: int, H: int) -> tupl
     return x0, y0, min(x0 + VIEW_W, W), min(y0 + VIEW_H, H)
 
 
-def grounding_samples(split: str, limit=None, seed: int = 42) -> tuple:
+def grounding_samples(split: str, limit=None, seed: int = 42,
+                      max_pixels_blocks: int = 1280) -> tuple:
     """Mind2Web 的（截图，元素描述）-> bbox。返回 (样本, 跳过原因统计)。"""
     import pyarrow.parquet as pq
     from huggingface_hub import snapshot_download
@@ -315,6 +334,7 @@ def grounding_samples(split: str, limit=None, seed: int = 42) -> tuple:
                     continue
                 cb = [max(0.0, min(cb[0], cw)), max(0.0, min(cb[1], ch)),
                       max(0.0, min(cb[2], cw)), max(0.0, min(cb[3], ch))]
+                cb = to_model_space(cb, cw, ch, max_pixels_blocks)
 
                 name = f"{r['annotation_id']}_{r['action_uid']}.jpg"
                 path = CROPS / name
@@ -342,6 +362,9 @@ def main() -> None:
     ap.add_argument("--limit-grounding", type=int, default=None,
                     help="定位样本只留这么多。第一版定位占了 70%%，动作生成被挤掉")
     ap.add_argument("--no-plan", action="store_true", help="不出拆解样本")
+    ap.add_argument("--max-pixels", type=int, default=1280,
+                    help="训练时送进模型的图片上限，单位 28x28 的块。定位样本的目标框"
+                         "要写在这个上限对应的坐标空间里，必须和 train_lora.py 一致")
     ap.add_argument("--no-ocr", action="store_true",
                     help="动作样本的提示词里不带元素清单。带清单要先跑一遍 OCR")
     args = ap.parse_args()
@@ -379,7 +402,8 @@ def main() -> None:
         val += pv
 
     if not args.no_grounding:
-        g, skip = grounding_samples("train", limit=args.limit_mind2web)
+        g, skip = grounding_samples("train", limit=args.limit_mind2web,
+                                    max_pixels_blocks=args.max_pixels)
         if args.limit_grounding is not None:
             random.shuffle(g)
             g = g[:args.limit_grounding]
