@@ -40,6 +40,19 @@ def load_rows(split: str, limit=None) -> list:
     return rows[:limit] if limit else rows
 
 
+def est_tokens(row: dict, tokenizer, max_pixels_blocks: int) -> int:
+    """估一条样本的 token 数：文本实算，图片按 28x28 的块数算（不超过上限）。
+
+    只读图片头拿尺寸，不解码，1000 多条不到一秒。
+    """
+    from PIL import Image
+
+    with Image.open(row["image"]) as im:
+        w, h = im.size
+    return (len(tokenizer(row["prompt"] + row["response"])["input_ids"])
+            + min(max_pixels_blocks, (w * h) // (28 * 28)))
+
+
 def sortish_batches(rows: list, accum: int, rng) -> list:
     """按长度排好再切成一批批，然后打乱批的顺序。
 
@@ -151,6 +164,16 @@ def main() -> None:
     model.enable_input_require_grads()
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"可训练参数 {trainable / 1e6:.1f} M")
+
+    # 先按长度筛一遍，再算总步数。不筛的话超长样本在训练时被 encode 丢掉，
+    # 实际更新次数比 total 少（上一轮 105 次对 156 次），OneCycleLR 的学习率
+    # 就退不到底。
+    too_long = [r for r in train if est_tokens(r, processor.tokenizer, args.max_pixels)
+                > args.max_len]
+    if too_long:
+        keep = {id(r) for r in train} - {id(r) for r in too_long}
+        train = [r for r in train if id(r) in keep]
+        print(f"按长度预筛掉 {len(too_long)} 条超长样本，剩 {len(train)} 条")
 
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
     total = math.ceil(len(train) * args.epochs / args.accum)

@@ -58,18 +58,26 @@ MIND2WEB_REPO = "osunlp/Multimodal-Mind2Web"
 # --------------------------------------------------------------------------
 
 
-# 训练样本的长度预算。动作样本的元素清单占大头，中位 2030 token；显存占满之后
-# 每次更新从 33 s 涨到 130 s，所以按这个预算裁清单条数，而不是丢掉超长样本——
-# 丢掉就等于只拿文字稀疏的界面训练。
-TOKEN_BUDGET = 1900
+# 文本部分的长度预算。图片那部分另算：1024x768 的截图在 --max-pixels 640 下占
+# 约 631 个 token，训练时 --max-len 2048，所以文本留 1350，两头相加还有余量。
+#
+# 第一次把预算定成 1900（只看文本）等于没限制，训练时 408/1248 条被静默跳过，
+# 而且跳过的都是文字密集的界面——相当于只拿文字稀疏的屏幕训练。超了就裁元素
+# 清单的条数，不丢样本。
+TOKEN_BUDGET = 1360
 ELEMENT_STEPS = (60, 45, 30, 20, 12, 6, 0)
 
 
-def fit_prompt(instruction, state, history, count_tokens) -> tuple:
-    """在长度预算内尽量多列元素，返回 (提示词, 用了多少条元素)。"""
+def fit_prompt(instruction, state, history, count_tokens, response="") -> tuple:
+    """在长度预算内尽量多列元素，返回 (提示词, 用了多少条元素)。
+
+    预算算的是提示词加回答：回答里有一段人工修正的说明文字，几十个 token，
+    只量提示词的话这部分会溢出去（第一次就是这样，217 条超了预算）。
+    """
+    extra = count_tokens(response) if count_tokens else 0
     for limit in ELEMENT_STEPS:
         prompt = render_prompt(instruction, state, history, elements_limit=limit)
-        if count_tokens is None or count_tokens(prompt) <= TOKEN_BUDGET:
+        if count_tokens is None or count_tokens(prompt) + extra <= TOKEN_BUDGET:
             return prompt, limit
     return prompt, ELEMENT_STEPS[-1]
 
@@ -105,18 +113,11 @@ def action_samples(split: str, ocr=None, count_tokens=None) -> list:
         h, w = img.shape[:2]
         elements = ocr(img, image) if ocr else []
         state = ScreenState(width=w, height=h, elements=elements)
-        # 只在提示词真的会列出来的那些元素里挑编号。清单有上限，拿一个没显示的
-        # 编号当目标就是在教模型输出它看不到的东西。
-        shown = select_elements(state)
         history = []
         for r in steps_raw:
             act = dict(r["action"])
             if act.get("point"):
                 act["point"] = [round(v, 4) for v in act["point"]]
-                eid = element_at(shown, act["point"])
-                if eid is not None:
-                    act = {k: v for k, v in act.items() if k != "point"}
-                    act["element"] = eid
             # 不带子任务：评测脚本和默认配置（plan=False）都只有整体任务，
             # 训练时喂子任务就又是一处训练/推理不一致。同一张图上的多个动作靠
             # 历史区分，不靠子任务。
@@ -124,15 +125,26 @@ def action_samples(split: str, ocr=None, count_tokens=None) -> list:
             thought = r.get("thought", "")
             if not thought:
                 continue  # 没有说明文字的不收，免得和有说明文字的样本教法不一致
-            prompt, used = fit_prompt(instruction, state, list(history), count_tokens)
+            # 先按「给坐标」这一版估长度定下清单条数，再在**实际会显示**的元素里
+            # 挑编号。顺序反过来的话，清单被裁短之后编号可能已经不在清单里了——
+            # 那就是在教模型输出它看不到的编号（第一次 141 条里错了 4 条，
+            # 加了自适应裁剪后错 21 条）。
+            resp = json.dumps({"thought": thought, "action": act}, ensure_ascii=False)
+            prompt, used = fit_prompt(instruction, state, list(history), count_tokens, resp)
+            eid = element_at(select_elements(state, used), act["point"])                 if act.get("point") else None
+            if eid is not None:
+                # 换成编号只会更短（"element": 12 比 "point": [0.1, 0.2] 短），
+                # 不会顶破预算
+                act = {k: v for k, v in act.items() if k != "point"}
+                act["element"] = eid
+                resp = json.dumps({"thought": thought, "action": act}, ensure_ascii=False)
             out.append({
                 "kind": "action",
                 "source": "screenagent",
                 "image": image,
                 "elements_shown": used,
                 "prompt": prompt,
-                "response": json.dumps({"thought": thought, "action": act},
-                                       ensure_ascii=False),
+                "response": resp,
             })
             history.append(Step(state, Action.from_dict(r["action"]), ok=True, changed=True))
     return out
