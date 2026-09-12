@@ -35,9 +35,11 @@ scripts/
     prepare_data.py        公开数据集预处理
     build_finetune_data.py 由预处理结果构建微调训练集与验证集
     train_lora.py          LoRA 微调
+    audit_finetune_data.py 微调数据集审计，查静默的错标、重复、泄漏
     eval_grounding.py      UI 元素定位精度评测
     eval_screenagent.py    动作生成评测
     eval_perception.py     感知模块的命中率与速度评测
+    eval_plan.py           任务拆解质量评测
     tune_prompt.py         提示词变体对比
     snapshot_state.py      记录并核对实验前后的桌面状态
     gen_test_report.py     由 pytest 收集结果生成单元测试报告

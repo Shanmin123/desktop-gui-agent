@@ -207,6 +207,15 @@ def plan_samples(split: str) -> list:
             continue
         img = imread(r["image"])
         h, w = img.shape[:2]
+        # 同一条计划里重复的子任务去掉，去完为空的不收
+        steps, seen_step = [], set()
+        for s in r["subtasks"]:
+            s = s.strip()
+            if s and s not in seen_step:
+                seen_step.add(s)
+                steps.append(s)
+        if not steps:
+            continue
         out.append({
             "kind": "plan",
             "source": "screenagent",
@@ -215,7 +224,7 @@ def plan_samples(split: str) -> list:
                 instruction=r["instruction_zh"] or r["instruction"],
                 elements="  （这一步不看元素清单）",
                 max_subtasks=MAX_SUBTASKS),
-            "response": json.dumps(r["subtasks"][:MAX_SUBTASKS], ensure_ascii=False),
+            "response": json.dumps(steps[:MAX_SUBTASKS], ensure_ascii=False),
         })
     return out
 
@@ -381,6 +390,26 @@ def main() -> None:
         n_val = max(1, len(g) // 10)
         val += g[:n_val]
         train += g[n_val:]
+
+    # 完全相同的样本去掉一份。ScreenAgent 里同一步会被记录两次，重复样本占不了
+    # 多少，但会让某几条被多学一遍。
+    def dedupe(rows):
+        seen, out = set(), []
+        for r in rows:
+            # 不带截图：同一份计划会配不同截图重复出现，同一个元素也会在不同裁剪里
+            # 重复，教的是同一个映射
+            key = (r["prompt"], r["response"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(r)
+        return out
+
+    n_before = len(train) + len(val)
+    train, val = dedupe(train), dedupe(val)
+    dropped = n_before - len(train) - len(val)
+    if dropped:
+        print(f"去掉完全重复的样本 {dropped} 条")
 
     random.shuffle(train)
     OUT.mkdir(parents=True, exist_ok=True)
