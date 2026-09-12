@@ -39,6 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from gui_agent.agent import select_elements
 from gui_agent.chain import render_prompt
 from gui_agent.models import GROUNDING_PROMPT
 from gui_agent.perception import imread
@@ -88,12 +89,15 @@ def action_samples(split: str, ocr=None) -> list:
         h, w = img.shape[:2]
         elements = ocr(img, image) if ocr else []
         state = ScreenState(width=w, height=h, elements=elements)
+        # 只在提示词真的会列出来的那些元素里挑编号。清单有上限，拿一个没显示的
+        # 编号当目标就是在教模型输出它看不到的东西。
+        shown = select_elements(state)
         history = []
         for r in steps_raw:
             act = dict(r["action"])
             if act.get("point"):
                 act["point"] = [round(v, 4) for v in act["point"]]
-                eid = element_at(elements, act["point"])
+                eid = element_at(shown, act["point"])
                 if eid is not None:
                     act = {k: v for k, v in act.items() if k != "point"}
                     act["element"] = eid

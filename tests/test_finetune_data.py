@@ -1,6 +1,7 @@
 """微调数据的构建：描述提取、裁剪窗口、坐标换算。"""
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -132,15 +133,21 @@ def test_built_samples_are_wellformed():
     rows = [json.loads(l) for l in p.open(encoding="utf-8")]
     assert rows
     for r in rows[:200]:
-        assert r["kind"] in ("action", "grounding")
+        assert r["kind"] in ("action", "grounding", "plan")
         assert r["prompt"] and r["response"]
         assert Path(r["image"]).is_file()
         body = json.loads(r["response"])
         if r["kind"] == "grounding":
             b = body["bbox_2d"]
             assert len(b) == 4 and b[0] <= b[2] and b[1] <= b[3]
+        elif r["kind"] == "plan":
+            # 拆解样本的回答是子任务数组，每项一句话
+            assert isinstance(body, list) and body
+            assert all(isinstance(s, str) and s.strip() for s in body)
         else:
             assert "action" in body and "type" in body["action"]
+            # thought 不能是空串：第一版就是空串，等于教模型别写理由
+            assert body.get("thought", "").strip()
 
 
 def test_action_samples_carry_valid_actions():
@@ -155,7 +162,13 @@ def test_action_samples_carry_valid_actions():
         r = json.loads(line)
         if r["kind"] != "action":
             continue
-        Action.from_dict(json.loads(r["response"])["action"])
+        act = json.loads(r["response"])["action"]
+        if "element" in act:
+            # 编号必须出现在提示词列出的清单里，否则是在教模型输出它看不到的编号
+            shown = {int(m) for m in re.findall(r"^\s*\[(\d+)\]", r["prompt"], re.M)}
+            assert isinstance(act["element"], int) and act["element"] in shown,                 f"编号 {act['element']} 不在提示词的元素清单里"
+        else:
+            Action.from_dict(act)
         n += 1
         if n >= 300:
             break

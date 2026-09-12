@@ -425,3 +425,39 @@ def test_plan_prompt_forbids_inventing_folder_steps():
     tpl = PLAN_TEMPLATE.format(instruction="x", elements="  （无）", max_subtasks=7)
     assert "文件夹都已经存在" in tpl
     assert "新建文件夹" in tpl  # 明确点出不要补的那类步骤
+
+
+# --- 拆解质量评测的指标 -----------------------------------------------------
+
+
+def test_char_f1_is_one_for_identical_and_zero_for_disjoint():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "ep", Path(__file__).resolve().parents[1] / "scripts" / "eval_plan.py")
+    ep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ep)
+
+    assert ep.char_f1("打开浏览器", "打开浏览器") == 1.0
+    assert ep.char_f1("打开浏览器", "xyz") == 0.0
+    # 词序不同但字一样，应该接近 1
+    assert ep.char_f1("打开浏览器", "浏览器打开") == 1.0
+
+
+def test_coverage_rewards_matching_steps_and_ignores_extras():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "ep", Path(__file__).resolve().parents[1] / "scripts" / "eval_plan.py")
+    ep = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ep)
+
+    ref = ["打开浏览器", "搜索 python"]
+    assert ep.coverage(ref, ref) == 1.0
+    assert ep.coverage(ref, []) == 0.0
+    # 多拆几步不扣覆盖率，多余步数由另一个指标反映
+    assert ep.coverage(ref, ref + ["再打开记事本"]) == 1.0
+    # 漏了一条，覆盖率应明显下降
+    assert ep.coverage(ref, ["打开浏览器"]) < 0.7
