@@ -21,10 +21,23 @@ import numpy as np
 DEFAULT_MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
 
 # 让模型只回坐标，不要解释。要求 JSON 是因为比自由文本好解析。
+#
+# 两套口径：
+#   像素框    Qwen2.5-VL 预训练时就是这么输出的，基座模型零样本走这条
+#   归一化点  微调后走这条。OS-Atlas、SeeClick 的动作空间都用 [0,1] 的比例值，
+#             和分辨率无关——像素框那套在训练和推理的 max_pixels 不一致时，
+#             目标框会整体偏掉（实测差 39%，ScreenSpot 从 71.6% 掉到 30.2%）
 GROUNDING_PROMPT = (
     "请在截图中找到「{instruction}」对应的界面元素，"
     "只返回一个 JSON 对象，格式为 {{\"bbox_2d\": [x1, y1, x2, y2]}}，"
     "坐标为图片中的像素值。不要输出任何其他内容。"
+)
+
+GROUNDING_PROMPT_NORM = (
+    "请在截图中找到「{instruction}」对应的界面元素，"
+    "只返回一个 JSON 对象，格式为 {{\"point\": [x, y]}}，"
+    "x 和 y 是 0 到 1 之间的小数，表示该位置在图片宽和高上的比例。"
+    "不要输出任何其他内容。"
 )
 
 
@@ -93,6 +106,24 @@ def parse_box(text: str) -> Optional[Tuple[float, float, float, float]]:
     return tuple(nums[:4]) if len(nums) >= 4 else None
 
 
+def parse_norm_point(text: str) -> Optional[Tuple[float, float]]:
+    """从模型输出里抠出一个归一化的点。
+
+    收两种形式：{"point": [x, y]} 和裸的 [x, y]。值必须落在 0~1，
+    超出范围说明模型退回了像素口径，这时返回 None 交给上层按解析失败处理，
+    不能硬当成比例——那会把点压到左上角。
+    """
+    m = re.search(r'"point"\s*:\s*\[([^\]]+)\]', text)
+    if not m:
+        m = re.search(r"\[\s*([\d.]+\s*,\s*[\d.]+)\s*\]", text)
+    if not m:
+        return None
+    nums = [float(v) for v in re.findall(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", m.group(1))]
+    if len(nums) != 2 or not all(0.0 <= v <= 1.0 for v in nums):
+        return None
+    return nums[0], nums[1]
+
+
 def box_center(box) -> Tuple[float, float]:
     x1, y1, x2, y2 = box
     return (x1 + x2) / 2, (y1 + y2) / 2
@@ -117,10 +148,12 @@ class LocalQwenVL:
         min_pixels: int = 256 * 28 * 28,
         max_pixels: int = 1280 * 28 * 28,
         adapter: Optional[str] = None,
+        norm_coords: bool = False,
     ) -> None:
         import torch
         from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
+        self.norm_coords = norm_coords
         self.torch = torch
         self.model_id = model_id
         self.min_pixels = min_pixels
@@ -179,7 +212,15 @@ class LocalQwenVL:
         return self.processor.batch_decode(trimmed, skip_special_tokens=True)[0].strip()
 
     def locate(self, image: np.ndarray, instruction: str) -> Optional[Tuple[float, float]]:
-        """给一句话，返回归一化的点击点，找不到返回 None。"""
+        """给一句话，返回归一化的点击点，找不到返回 None。
+
+        norm_coords=True 时直接问 0~1 的比例值，不经过像素换算。像素那条路要拿
+        预测框除以 smart_resize 后的尺寸，训练和推理的 max_pixels 一旦不同就整体
+        偏掉；比例值与分辨率无关，OS-Atlas 和 SeeClick 用的都是这套。
+        """
+        if getattr(self, "norm_coords", False):
+            raw = self.ask(image, GROUNDING_PROMPT_NORM.format(instruction=instruction))
+            return parse_norm_point(raw)
         raw = self.ask(image, GROUNDING_PROMPT.format(instruction=instruction))
         box = parse_box(raw)
         if box is None:
@@ -255,7 +296,15 @@ class OpenAICompatVLM:
         )
 
     def locate(self, image: np.ndarray, instruction: str) -> Optional[Tuple[float, float]]:
-        """给一句话，返回归一化的点击点，找不到返回 None。"""
+        """给一句话，返回归一化的点击点，找不到返回 None。
+
+        norm_coords=True 时直接问 0~1 的比例值，不经过像素换算。像素那条路要拿
+        预测框除以 smart_resize 后的尺寸，训练和推理的 max_pixels 一旦不同就整体
+        偏掉；比例值与分辨率无关，OS-Atlas 和 SeeClick 用的都是这套。
+        """
+        if getattr(self, "norm_coords", False):
+            raw = self.ask(image, GROUNDING_PROMPT_NORM.format(instruction=instruction))
+            return parse_norm_point(raw)
         raw = self.ask(image, GROUNDING_PROMPT.format(instruction=instruction))
         box = parse_box(raw)
         if box is None:

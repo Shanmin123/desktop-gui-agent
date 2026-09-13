@@ -113,6 +113,10 @@ def main() -> None:
                     help="每多少次更新存一次适配器权重。只在最后存的话，训练中途卡死"
                          "就什么都拿不到——第一次跑到 160/175 时 backward 挂住，"
                          "几个小时的训练全丢了。0 表示只在结束时存")
+    ap.add_argument("--init-adapter", default=None,
+                    help="在已有适配器的基础上接着训，用于顺序课程：先训定位、"
+                         "再在它上面训动作。OS-Atlas 就是这个路子——先做定位预训练，"
+                         "再做动作微调，而不是把两类样本混在一轮里")
     ap.add_argument("--load-in-4bit", action="store_true")
     ap.add_argument("--tag", default="lora")
     ap.add_argument("--seed", type=int, default=42)
@@ -157,9 +161,15 @@ def main() -> None:
     print(f"  耗时 {time.perf_counter() - t0:.1f}s，"
           f"显存 {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
 
-    model = get_peft_model(model, LoraConfig(
-        r=args.rank, lora_alpha=args.rank * 2, lora_dropout=0.05, bias="none",
-        task_type="CAUSAL_LM", target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]))
+    if args.init_adapter:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, args.init_adapter, is_trainable=True)
+        print(f"接着 {args.init_adapter} 的权重训")
+    else:
+        model = get_peft_model(model, LoraConfig(
+            r=args.rank, lora_alpha=args.rank * 2, lora_dropout=0.05, bias="none",
+            task_type="CAUSAL_LM", target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]))
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)

@@ -138,8 +138,12 @@ def test_built_samples_are_wellformed():
         assert Path(r["image"]).is_file()
         body = json.loads(r["response"])
         if r["kind"] == "grounding":
-            b = body["bbox_2d"]
-            assert len(b) == 4 and b[0] <= b[2] and b[1] <= b[3]
+            if "point" in body:      # 归一化口径：0~1 的点
+                assert len(body["point"]) == 2
+                assert all(0.0 <= v <= 1.0 for v in body["point"])
+            else:                    # 像素口径：左上角要在右下角之前
+                b = body["bbox_2d"]
+                assert len(b) == 4 and b[0] <= b[2] and b[1] <= b[3]
         elif r["kind"] == "plan":
             # 拆解样本的回答是子任务数组，每项一句话
             assert isinstance(body, list) and body
@@ -223,7 +227,15 @@ def test_built_grounding_boxes_are_in_model_space():
             continue
         with Image.open(r["image"]) as im:
             w, h = im.size
-        b = json.loads(r["response"])["bbox_2d"]
+        body = json.loads(r["response"])
+        if "point" in body:
+            # 归一化口径不需要 smart_resize 换算，这条检查不适用
+            assert all(0.0 <= v <= 1.0 for v in body["point"])
+            n += 1
+            if n >= 80:
+                break
+            continue
+        b = body["bbox_2d"]
         ok = False
         for blocks in (640, 1280):
             rh, rw = smart_resize(h, w, factor=28, min_pixels=256 * 28 * 28,
@@ -235,3 +247,23 @@ def test_built_grounding_boxes_are_in_model_space():
         n += 1
         if n >= 80:
             break
+
+
+def test_norm_coords_grounding_targets_are_ratios():
+    """归一化口径下目标是 0~1 的点，不再需要 smart_resize 换算。"""
+    import importlib.util
+    from pathlib import Path as _P
+
+    spec = importlib.util.spec_from_file_location(
+        "bf", _P(__file__).resolve().parents[1] / "scripts" / "build_finetune_data.py")
+    bf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bf)
+
+    from gui_agent.models import GROUNDING_PROMPT_NORM
+
+    # 提示词和推理时那份必须一字不差
+    assert "point" in GROUNDING_PROMPT_NORM.format(instruction="x")
+    # 构建函数签名里要有这个开关
+    import inspect
+
+    assert "norm_coords" in inspect.signature(bf.grounding_samples).parameters

@@ -401,3 +401,65 @@ def test_injected_failure_is_recoverable_by_retry():
     t = Agent(P(), Controller(backend=RecordingBackend(), dry_run=True), flaky,
               retry_backoff=0).run("x")
     assert t.success is True and t.retries >= 1
+
+
+# --- 归一化坐标（照 OS-Atlas / SeeClick 的做法）------------------------------
+
+
+@pytest.mark.parametrize("text,want", [
+    ('{"point": [0.42, 0.13]}', (0.42, 0.13)),
+    ('[0.5, 0.5]', (0.5, 0.5)),
+    ('  {"point":[0.0,1.0]}  ', (0.0, 1.0)),
+])
+def test_parse_norm_point_accepts_ratios(text, want):
+    from gui_agent.models import parse_norm_point
+
+    assert parse_norm_point(text) == want
+
+
+@pytest.mark.parametrize("text", [
+    '{"point": [512, 384]}',      # 像素值，不能当成比例
+    '{"point": [1.5, 0.2]}',      # 越界
+    '{"point": [-0.1, 0.2]}',
+    '{"bbox_2d": [1, 2, 3, 4]}',  # 框不是点
+    "找不到这个元素",
+])
+def test_parse_norm_point_rejects_non_ratios(text):
+    """越界的值要判成解析失败，硬当比例会把点压到左上角。"""
+    from gui_agent.models import parse_norm_point
+
+    assert parse_norm_point(text) is None
+
+
+def test_norm_prompt_asks_for_ratio_not_pixels():
+    from gui_agent.models import GROUNDING_PROMPT, GROUNDING_PROMPT_NORM
+
+    p = GROUNDING_PROMPT_NORM.format(instruction="保存按钮")
+    assert "保存按钮" in p and "0 到 1" in p and "比例" in p
+    assert "像素" not in p
+    # 像素那套要留着：基座模型是按像素框预训练的，两边各用各的口径
+    assert "像素" in GROUNDING_PROMPT.format(instruction="x")
+
+
+def test_locate_uses_the_norm_path_when_enabled():
+    """开了 norm_coords 就不再走像素换算，直接拿比例值。"""
+    import numpy as np
+
+    from gui_agent.models import LocalQwenVL
+
+    class Fake(LocalQwenVL):
+        def __init__(self, norm):
+            self.norm_coords = norm
+            self.asked = []
+
+        def ask(self, image, prompt, **kw):
+            self.asked.append(prompt)
+            return '{"point": [0.25, 0.75]}' if self.norm_coords else '{"bbox_2d": [10, 20, 30, 40]}'
+
+        def resized_size(self, h, w):
+            return (h, w)
+
+    img = np.zeros((100, 200, 3), dtype=np.uint8)
+    assert Fake(True).locate(img, "保存") == (0.25, 0.75)
+    # 像素那条路要除以尺寸：框中心 (20, 30) / (200, 100)
+    assert Fake(False).locate(img, "保存") == pytest.approx((0.1, 0.3))

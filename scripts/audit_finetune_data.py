@@ -12,7 +12,7 @@
   6  动作样本的 element 编号不在提示词清单里 / 动作解析不出来
   7  thought 里直接写了坐标（模型会学着抄）
   8  动作样本的 thought 是空串
-  9  定位样本的框超出图片范围
+  9  定位样本的坐标超出范围（像素框出图 / 归一化点不在 0~1）
   10 拆解样本为空或有重复子任务
 
 用法：
@@ -88,15 +88,19 @@ empty_thought = sum(1 for r in train + val if r["kind"] == "action"
                     and not json.loads(r["response"]).get("thought", "").strip())
 if empty_thought: issue("动作样本的 thought 是空串", empty_thought)
 
-# 9 定位样本：框必须落在图里
+# 9 定位样本：像素框要落在图里，归一化的点要落在 0~1
 import PIL.Image
 bad_box = 0
 for r in (train + val):
     if r["kind"] != "grounding": continue
-    b = json.loads(r["response"])["bbox_2d"]
+    body = json.loads(r["response"])
+    if "point" in body:
+        if not all(0.0 <= v <= 1.0 for v in body["point"]): bad_box += 1
+        continue
+    b = body["bbox_2d"]
     with PIL.Image.open(r["image"]) as im: w, h = im.size
     if not (0 <= b[0] < b[2] <= w and 0 <= b[1] < b[3] <= h): bad_box += 1
-if bad_box: issue("定位样本的框超出图片范围", bad_box)
+if bad_box: issue("定位样本的坐标超出范围", bad_box)
 
 # 10 拆解样本：子任务非空且不重复
 bad_plan = 0

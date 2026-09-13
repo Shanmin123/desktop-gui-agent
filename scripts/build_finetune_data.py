@@ -41,7 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gui_agent.agent import select_elements
 from gui_agent.chain import render_prompt
-from gui_agent.models import GROUNDING_PROMPT
+from gui_agent.models import GROUNDING_PROMPT, GROUNDING_PROMPT_NORM
 from gui_agent.perception import imread
 from gui_agent.planner import MAX_SUBTASKS, PLAN_TEMPLATE
 from gui_agent.schema import Action, Element, ScreenState, Step
@@ -276,7 +276,7 @@ def crop_box(bx: float, by: float, bw: float, bh: float, W: int, H: int) -> tupl
 
 
 def grounding_samples(split: str, limit=None, seed: int = 42,
-                      max_pixels_blocks: int = 1280) -> tuple:
+                      max_pixels_blocks: int = 1280, norm_coords: bool = False) -> tuple:
     """Mind2Web 的（截图，元素描述）-> bbox。返回 (样本, 跳过原因统计)。"""
     import pyarrow.parquet as pq
     from huggingface_hub import snapshot_download
@@ -334,7 +334,13 @@ def grounding_samples(split: str, limit=None, seed: int = 42,
                     continue
                 cb = [max(0.0, min(cb[0], cw)), max(0.0, min(cb[1], ch)),
                       max(0.0, min(cb[2], cw)), max(0.0, min(cb[3], ch))]
-                cb = to_model_space(cb, cw, ch, max_pixels_blocks)
+                if norm_coords:
+                    # 归一化：取框中心除以裁剪图的宽高，和分辨率无关，
+                    # 不需要 smart_resize 换算，也就没有那类偏差
+                    pt = [round((cb[0] + cb[2]) / 2 / cw, 4),
+                          round((cb[1] + cb[3]) / 2 / ch, 4)]
+                else:
+                    cb = to_model_space(cb, cw, ch, max_pixels_blocks)
 
                 name = f"{r['annotation_id']}_{r['action_uid']}.jpg"
                 path = CROPS / name
@@ -343,9 +349,11 @@ def grounding_samples(split: str, limit=None, seed: int = 42,
                     "kind": "grounding",
                     "source": "mind2web",
                     "image": str(path.resolve()),
-                    "prompt": GROUNDING_PROMPT.format(instruction=desc),
+                    "prompt": (GROUNDING_PROMPT_NORM if norm_coords
+                               else GROUNDING_PROMPT).format(instruction=desc),
                     "response": json.dumps(
-                        {"bbox_2d": [round(v, 1) for v in cb]}, ensure_ascii=False),
+                        {"point": pt} if norm_coords
+                        else {"bbox_2d": [round(v, 1) for v in cb]}, ensure_ascii=False),
                 })
     return out, skip
 
@@ -365,6 +373,10 @@ def main() -> None:
     ap.add_argument("--max-pixels", type=int, default=1280,
                     help="训练时送进模型的图片上限，单位 28x28 的块。定位样本的目标框"
                          "要写在这个上限对应的坐标空间里，必须和 train_lora.py 一致")
+    ap.add_argument("--norm-coords", action="store_true",
+                    help="定位样本改用归一化坐标 {\"point\": [x, y]}，0~1。"
+                         "OS-Atlas 和 SeeClick 都用这套，与分辨率无关；像素框那套"
+                         "要靠 smart_resize 换算，训练和推理的 max_pixels 一不同就整体偏掉")
     ap.add_argument("--no-ocr", action="store_true",
                     help="动作样本的提示词里不带元素清单。带清单要先跑一遍 OCR")
     args = ap.parse_args()
@@ -403,7 +415,8 @@ def main() -> None:
 
     if not args.no_grounding:
         g, skip = grounding_samples("train", limit=args.limit_mind2web,
-                                    max_pixels_blocks=args.max_pixels)
+                                    max_pixels_blocks=args.max_pixels,
+                                    norm_coords=args.norm_coords)
         if args.limit_grounding is not None:
             random.shuffle(g)
             g = g[:args.limit_grounding]
