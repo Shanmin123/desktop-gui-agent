@@ -83,7 +83,8 @@ def fit_prompt(instruction, state, history, count_tokens, response="") -> tuple:
 
 
 def action_samples(split: str, ocr=None, count_tokens=None,
-                   two_stage: bool = False, target_elements: bool = False) -> list:
+                   two_stage: bool = False, target_elements: bool = False,
+                   target_pad: float = 0.0) -> list:
     """ScreenAgent 的可执行动作 -> 训练样本。
 
     三处和第一版不同，都是照着第一版掉分的原因改的：
@@ -105,11 +106,17 @@ def action_samples(split: str, ocr=None, count_tokens=None,
     69.5%），两边各用各的长处。代价是点击类动作只有真值点落在有文字的 OCR 元素
     里才收得进来，其余的没有可写的控件名。
     """
-    src = ROOT / "data" / "screenagent" / f"{split}.jsonl"
-    if not src.is_file():
-        raise SystemExit(f"没有 {src}，先跑 scripts/prepare_screenagent.py")
+    # split 可以写成 "train+val"：验证划分也拿来训。这一周已经量过验证 loss 在这个
+    # 数据规模上选不出模型（五组里 loss 最低的任务指标排第四），那它留着当验证集的
+    # 价值就不如当训练数据。评测用的是 test 划分，不受影响。
+    srcs = []
+    for part in split.split("+"):
+        f = ROOT / "data" / "screenagent" / f"{part}.jsonl"
+        if not f.is_file():
+            raise SystemExit(f"没有 {f}，先跑 scripts/prepare_screenagent.py")
+        srcs.append(f)
 
-    rows = [json.loads(line) for line in src.open(encoding="utf-8")]
+    rows = [json.loads(line) for src in srcs for line in src.open(encoding="utf-8")]
     out, groups = [], {}
     for r in rows:
         if Path(r["image"]).is_file():
@@ -139,7 +146,7 @@ def action_samples(split: str, ocr=None, count_tokens=None,
             step = Step(state, Action.from_dict(r["action"]), ok=True, changed=True)
             if two_stage:
                 sample = target_sample(instruction, state, history, act, thought,
-                                       with_elements=target_elements)
+                                       with_elements=target_elements, pad=target_pad)
                 if sample is not None:
                     sample["image"] = image
                     out.append(sample)
@@ -176,8 +183,9 @@ def balance_types(samples: list, split: str, rng) -> list:
 
     做法是以整份数据的比例为准，按最缺的那一类定总量，其余类按比例抽。
     """
-    src = ROOT / "data" / "screenagent" / f"{split}.jsonl"
-    ref = Counter(json.loads(l)["action"]["type"] for l in src.open(encoding="utf-8"))
+    ref = Counter(json.loads(l)["action"]["type"]
+                  for part in split.split("+")
+                  for l in (ROOT / "data" / "screenagent" / f"{part}.jsonl").open(encoding="utf-8"))
     total_ref = sum(ref.values())
     by_type = {}
     for r in samples:
@@ -201,6 +209,8 @@ def balance_types(samples: list, split: str, rng) -> list:
     return out
 
 
+TARGET_PAD = 0.01               # 见 element_containing 的说明
+
 TARGET_ELEMENTS_LIMIT = 40      # 清单越长目标越可能被列到，但提示词也越长
                                 # 40 这一档：目标在清单里的 126 条，最长提示词 1314 token，
                                 # 加上图片的 631 个还塞得进 --max-len 2048。
@@ -208,7 +218,7 @@ TARGET_ELEMENTS_LIMIT = 40      # 清单越长目标越可能被列到，但提�
 
 
 def target_sample(instruction, state, history, act, thought, with_elements=False,
-                  limit: int = TARGET_ELEMENTS_LIMIT):
+                  limit: int = TARGET_ELEMENTS_LIMIT, pad: float = 0.0):
     """一条两段式的动作样本，位置写成控件名。收不进来就返回 None。
 
     with_elements=True 时提示词里带 OCR 元素清单，让模型照抄原文当 target。
@@ -223,7 +233,7 @@ def target_sample(instruction, state, history, act, thought, with_elements=False
         if not act.get("point"):
             return None
         pool = select_elements(state, limit) if with_elements else state.elements
-        el = element_containing(pool, act["point"])
+        el = element_containing(pool, act["point"], pad)
         if el is None:
             return None        # 没有文字的图标，写不出控件名
         act = {k: v for k, v in act.items() if k not in ("point", "point2", "element")}
@@ -271,11 +281,18 @@ def cached_ocr(ocr):
     return run, save
 
 
-def element_containing(elements, point):
-    """真值点落在哪个元素里，返回最小的那个，没有就返回 None。"""
+def element_containing(elements, point, pad: float = 0.0):
+    """真值点落在哪个元素里，返回最小的那个，没有就返回 None。
+
+    pad 把框往外放一点（归一化单位）。真值点经常落在文字框外一点点——按钮的内边距
+    上——这时候其实就是在点这个按钮。实测 588 条点击类动作里，不放宽只收得到 152 条，
+    放宽 0.01 收得到 201 条，而原本就收得到的 152 条里只有 4 条会改挑到别的元素；
+    放到 0.02 就有 21 条改挑，开始把对的盖掉了。
+    """
     x, y = point
     hit = [e for e in elements
-           if e.bbox[0] <= x <= e.bbox[2] and e.bbox[1] <= y <= e.bbox[3] and e.text.strip()]
+           if e.bbox[0] - pad <= x <= e.bbox[2] + pad
+           and e.bbox[1] - pad <= y <= e.bbox[3] + pad and e.text.strip()]
     if not hit:
         return None
     return min(hit, key=lambda e: (e.bbox[2] - e.bbox[0]) * (e.bbox[3] - e.bbox[1]))
@@ -483,6 +500,13 @@ def main() -> None:
     ap.add_argument("--ocr-from-cache", action="store_true",
                     help="元素清单只从 data/screenagent/_ocr_cache.json 读，不加载识别"
                          "模型。显卡正忙着别的实验时用，缓存缺图就直接报错")
+    ap.add_argument("--train-split", default="train",
+                    help="动作和拆解样本从哪个划分取，可以写 train+val。验证 loss 在这个"
+                         "规模上选不出模型，验证划分拿来训更划算；评测用的 test 不受影响")
+    ap.add_argument("--target-pad", type=float, default=0.0,
+                    help="找控件名时把 OCR 文字框往外放这么多（归一化单位）。"
+                         "真值点常落在框外一点点的内边距上，0.01 能把点击样本从 152 "
+                         "收到 201 条，再往大放就开始挑错元素了")
     ap.add_argument("--target-elements", action="store_true",
                     help="两段式的第一问里带上 OCR 元素清单，让模型照抄原文当 target。"
                          "失败样例里错的主要是控件名本身不对，不是定位不准")
@@ -524,25 +548,28 @@ def main() -> None:
         # 图片那部分 token 另算，预算留给文本
         count_tokens = lambda s: len(tok(s)["input_ids"])
     try:
-        train = action_samples("train", ocr=ocr, count_tokens=count_tokens,
+        train = action_samples(args.train_split, ocr=ocr, count_tokens=count_tokens,
                                two_stage=args.two_stage,
-                               target_elements=args.target_elements)
+                               target_elements=args.target_elements,
+                               target_pad=args.target_pad)
         val = action_samples("val", ocr=ocr, count_tokens=count_tokens,
                              two_stage=args.two_stage,
-                             target_elements=args.target_elements)
+                             target_elements=args.target_elements,
+                             target_pad=args.target_pad)
     finally:
         if per is not None:
             save_cache()
             per.close()
     if args.balance_types:
         before = Counter(json.loads(r["response"])["action"]["type"] for r in train)
-        train = balance_types(train, "train", random)
+        train = balance_types(train, args.train_split, random)
         after = Counter(json.loads(r["response"])["action"]["type"] for r in train)
         print(f"按类型比例抽样：{dict(before)} -> {dict(after)}")
     print(f"动作样本（ScreenAgent）：训练 {len(train)}，验证 {len(val)}")
 
     if not args.no_plan:
-        pt, pv = plan_samples("train"), plan_samples("val")
+        pt = [r for part in args.train_split.split("+") for r in plan_samples(part)]
+        pv = plan_samples("val")
         print(f"拆解样本（ScreenAgent）：训练 {len(pt)}，验证 {len(pv)}")
         train += pt
         val += pv
@@ -590,6 +617,12 @@ def main() -> None:
                      encoding="utf-8")
         kinds = Counter(r["kind"] for r in rows)
         print(f"\n{p}  {len(rows)} 条  {dict(kinds)}")
+    # 把「验证划分是不是也拿去训了」写下来。训了的话 val.jsonl 就只是个训练 loss
+    # 探针，不再是留出集，审计脚本据此判断，不靠猜。
+    (OUT / "_notes.json").write_text(json.dumps({
+        "train_split": args.train_split,
+        "val_is_held_out": "val" not in args.train_split.split("+"),
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -58,8 +58,17 @@ for name, rows in (("train", train), ("val", val)):
     if conflict: issue(f"{name} 同一张图同一提示词配了多个不同回答", conflict)
 
 # 4 训练/验证的图片重叠
+# --train-split train+val 时验证划分本来就进了训练集，val.jsonl 只剩训练 loss 探针
+# 的作用，这时重叠是预期内的，按说明打印、不算问题。判断依据是构建时落的
+# _notes.json，不靠猜。
+_notes = ROOT / (sys.argv[1] if len(sys.argv) > 1 else "data/finetune") / "_notes.json"
+notes = json.loads(_notes.read_text(encoding="utf-8")) if _notes.is_file() else {}
 overlap = {r["image"] for r in train} & {r["image"] for r in val}
-if overlap: issue("训练集和验证集用了同一张截图", len(overlap))
+if overlap and notes.get("val_is_held_out", True):
+    issue("训练集和验证集用了同一张截图", len(overlap))
+elif overlap:
+    print(f"说明：验证划分也拿去训了（train_split={notes.get('train_split')}），"
+          f"{len(overlap)} 张截图两边共用，val.jsonl 只当训练 loss 探针")
 
 # 5 test 划分泄漏进训练
 test_imgs = {json.loads(l)["image"] for l in (ROOT/"data"/"screenagent"/"test.jsonl").open(encoding="utf-8")}
