@@ -328,3 +328,64 @@ def test_default_variant_matches_the_plain_template():
     from gui_agent.chain import render_prompt
 
     assert render_prompt("x", _state(), []) == render_prompt("x", _state(), [], variant="base")
+
+
+# --- 两段式第一问带元素清单 -------------------------------------------------
+
+
+def test_target_prompt_can_carry_the_element_list(screen):
+    """失败样例里错的主要是控件名本身不对，让模型照抄清单里的原文。"""
+    from gui_agent.chain import render_target_prompt
+
+    p = render_target_prompt("打开浏览器", [], screen)
+    assert "照抄" in p and "[0]" in p
+    assert "不要写坐标" in p and "不要写编号" in p
+
+
+def test_target_prompt_without_state_is_the_old_one(screen):
+    """不给 state 就还是原来那份，前面几轮的结果才比得下去。"""
+    from gui_agent.chain import TARGET_TEMPLATE, render_target_prompt
+
+    p = render_target_prompt("打开浏览器", [])
+    assert "当前屏幕上的文字元素" not in p and "照抄" not in p
+    # 模板里的花括号是双写的（LangChain 占位符转义），比对前还原成渲染后的样子
+    head = TARGET_TEMPLATE.split("任务：")[0].replace("{{", "{").replace("}}", "}")
+    assert p.startswith(head)
+
+
+def test_element_limit_is_honoured_in_the_target_prompt():
+    """清单要能裁短：提示词太长会连图片一起顶破训练的长度预算。"""
+    from gui_agent.chain import render_target_prompt
+    from gui_agent.schema import Element, ScreenState
+
+    st = ScreenState(1024, 768, elements=[
+        Element(id=i, bbox=(0.1, 0.01 * i, 0.2, 0.01 * i + 0.01), text=f"项目{i}")
+        for i in range(50)])
+    p = render_target_prompt("任务", [], st, 10)
+    assert "[9]" in p and "[10]" not in p
+
+
+def test_target_on_a_keyboard_action_is_ignored(screen):
+    """键盘动作不需要位置：模型给了 target 也不能往上套坐标。
+
+    第一问里列了元素清单之后，模型会把 hotkey 写成带 target 的样子。原来的解析
+    会给它安一个 point，掩盖掉真正的问题（缺 text）；现在按原样报缺字段。
+    """
+    from gui_agent.chain import parse_with_target
+
+    vlm = LocatingVLM("", point=(0.5, 0.5))
+    with pytest.raises(ValueError, match="text"):
+        parse_with_target('{"thought": "存盘", "action": {"type": "hotkey", "target": "保存"}}',
+                          vlm, None, screen)
+    assert vlm.located == []          # 根本不该去定位
+
+
+def test_keyboard_action_with_text_still_parses(screen):
+    from gui_agent.chain import parse_with_target
+
+    vlm = LocatingVLM("", point=(0.5, 0.5))
+    _, act = parse_with_target(
+        '{"thought": "存盘", "action": {"type": "hotkey", "text": "ctrl+s", "target": "保存"}}',
+        vlm, None, screen)
+    assert act.type == "hotkey" and act.text == "ctrl+s" and act.point is None
+    assert vlm.located == []

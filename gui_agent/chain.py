@@ -179,14 +179,43 @@ target 写界面上那个控件本身，比如「保存按钮」「地址栏」�
 
 TARGET_PROMPT = PromptTemplate.from_template(TARGET_TEMPLATE)
 
+# 带元素清单的变体。两段式的失败样例里，错的主要不是定位，是模型报出来的控件名
+# 本身不对——它凭印象写，写出 "Firefox W..." 这种截断的、屏幕上并不存在的字符串，
+# 第二段自然定位不到。把 OCR 认出来的文字列出来让它照抄，比让它自己想要稳。
+# 编号只是为了让清单可读，回答里仍然写文字本身，不写编号（编号解析不了图标）。
+_ELEMENTS_RULE = """target 优先照抄下面清单里的原文，一个字都不要改。
+清单里没有的（图标、没有文字的按钮）再自己描述，比如「左上角的关闭图标」。
+不要写坐标，也不要写编号，位置由另一步解析。
+
+当前屏幕上的文字元素：
+{elements}"""
+
+TARGET_WITH_ELEMENTS_TEMPLATE = TARGET_TEMPLATE.replace(
+    """target 写界面上那个控件本身，比如「保存按钮」「地址栏」「左上角的关闭图标」。
+不要写坐标，也不要写编号，位置由另一步解析。""", _ELEMENTS_RULE)
+assert TARGET_WITH_ELEMENTS_TEMPLATE != TARGET_TEMPLATE, "模板改过了就要同步改这里"
+
+TARGET_WITH_ELEMENTS_PROMPT = PromptTemplate.from_template(TARGET_WITH_ELEMENTS_TEMPLATE)
+
 NEEDS_TARGET = ("click", "left_double", "right_single", "scroll")
 
 
-def render_target_prompt(instruction: str, steps: List[Step]) -> str:
-    """两段式里第一段的提示词：只问点什么，不问点哪。"""
-    from .agent import format_history
+def render_target_prompt(instruction: str, steps: List[Step],
+                         state: Optional[ScreenState] = None,
+                         elements_limit: Optional[int] = None) -> str:
+    """两段式里第一段的提示词：只问点什么，不问点哪。
 
-    return TARGET_PROMPT.format(instruction=instruction, history=format_history(steps))
+    给了 state 就把 OCR 元素清单一并列出来，让模型照抄原文当 target；不给就是
+    原来那份，模型全凭截图自己写名字。
+    """
+    from .agent import MAX_ELEMENTS, format_elements, format_history
+
+    if state is None:
+        return TARGET_PROMPT.format(instruction=instruction, history=format_history(steps))
+    return TARGET_WITH_ELEMENTS_PROMPT.format(
+        instruction=instruction, history=format_history(steps),
+        elements=format_elements(state, MAX_ELEMENTS if elements_limit is None
+                                 else elements_limit))
 
 
 def build_chain(vlm, model_size_of=None, locate_target: bool = False) -> Runnable:
@@ -230,11 +259,14 @@ def parse_with_target(text: str, vlm, image, state: ScreenState,
     raw = data.get("action") if isinstance(data, dict) else None
     target = raw.get("target") if isinstance(raw, dict) else None
 
-    if not (isinstance(target, str) and target.strip()):
-        # 模型没给 target，按一段式那套再解析一次（它可能直接给了 element 或 point）
+    kind = str(raw.get("type", "click")) if isinstance(raw, dict) else "click"
+    if not (isinstance(target, str) and target.strip()) or kind not in NEEDS_TARGET:
+        # 没给 target，或者给了但这个动作根本不需要位置（type / hotkey 这些），
+        # 就按一段式那套再解析一次。后一种是实测出来的：第一问里列了元素清单之后，
+        # 模型会把 hotkey 也写成 {"type": "hotkey", "target": "..."}，
+        # 再往上套一个 point 只会把错误盖住，让它按原样报缺 text 更清楚。
         return parse_step(text, state, model_size)
 
-    kind = str(raw.get("type", "click"))
     point = vlm.locate(image, target.strip())
     if point is None:
         raise ValueError(f"定位不到「{target.strip()}」")

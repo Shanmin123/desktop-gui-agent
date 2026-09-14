@@ -83,7 +83,7 @@ def fit_prompt(instruction, state, history, count_tokens, response="") -> tuple:
 
 
 def action_samples(split: str, ocr=None, count_tokens=None,
-                   two_stage: bool = False) -> list:
+                   two_stage: bool = False, target_elements: bool = False) -> list:
     """ScreenAgent 的可执行动作 -> 训练样本。
 
     三处和第一版不同，都是照着第一版掉分的原因改的：
@@ -138,7 +138,8 @@ def action_samples(split: str, ocr=None, count_tokens=None,
             # 加了自适应裁剪后错 21 条）。
             step = Step(state, Action.from_dict(r["action"]), ok=True, changed=True)
             if two_stage:
-                sample = target_sample(instruction, state, history, act, thought)
+                sample = target_sample(instruction, state, history, act, thought,
+                                       with_elements=target_elements)
                 if sample is not None:
                     sample["image"] = image
                     out.append(sample)
@@ -200,15 +201,29 @@ def balance_types(samples: list, split: str, rng) -> list:
     return out
 
 
-def target_sample(instruction, state, history, act, thought):
-    """一条两段式的动作样本，位置写成控件名。收不进来就返回 None。"""
+TARGET_ELEMENTS_LIMIT = 40      # 清单越长目标越可能被列到，但提示词也越长
+                                # 40 这一档：目标在清单里的 126 条，最长提示词 1314 token，
+                                # 加上图片的 631 个还塞得进 --max-len 2048。
+                                # 放到 60 能多收 22 条，最长就涨到 1835，得把预算提到 3072
+
+
+def target_sample(instruction, state, history, act, thought, with_elements=False,
+                  limit: int = TARGET_ELEMENTS_LIMIT):
+    """一条两段式的动作样本，位置写成控件名。收不进来就返回 None。
+
+    with_elements=True 时提示词里带 OCR 元素清单，让模型照抄原文当 target。
+    这时控件名只能从**清单里真会显示出来的那些**元素里挑——挑到清单外的元素，
+    就是在教模型报一个它看不到的名字，和之前 element 编号那个坑是同一个。
+    """
+    from gui_agent.agent import select_elements
     from gui_agent.chain import NEEDS_TARGET, render_target_prompt
 
     act = dict(act)
     if act["type"] in NEEDS_TARGET:
         if not act.get("point"):
             return None
-        el = element_containing(state.elements, act["point"])
+        pool = select_elements(state, limit) if with_elements else state.elements
+        el = element_containing(pool, act["point"])
         if el is None:
             return None        # 没有文字的图标，写不出控件名
         act = {k: v for k, v in act.items() if k not in ("point", "point2", "element")}
@@ -219,7 +234,8 @@ def target_sample(instruction, state, history, act, thought):
         "kind": "action",
         "source": "screenagent",
         "elements_shown": 0,
-        "prompt": render_target_prompt(instruction, list(history)),
+        "prompt": render_target_prompt(instruction, list(history),
+                                       state if with_elements else None, limit),
         "response": json.dumps({"thought": thought, "action": act}, ensure_ascii=False),
     }
 
@@ -467,6 +483,9 @@ def main() -> None:
     ap.add_argument("--ocr-from-cache", action="store_true",
                     help="元素清单只从 data/screenagent/_ocr_cache.json 读，不加载识别"
                          "模型。显卡正忙着别的实验时用，缓存缺图就直接报错")
+    ap.add_argument("--target-elements", action="store_true",
+                    help="两段式的第一问里带上 OCR 元素清单，让模型照抄原文当 target。"
+                         "失败样例里错的主要是控件名本身不对，不是定位不准")
     ap.add_argument("--two-stage", action="store_true",
                     help="动作样本改用两段式：提示词只问要操作哪个控件，回答里位置"
                          "写成 target 控件名，坐标留给第二段的定位提示词。"
@@ -506,9 +525,11 @@ def main() -> None:
         count_tokens = lambda s: len(tok(s)["input_ids"])
     try:
         train = action_samples("train", ocr=ocr, count_tokens=count_tokens,
-                               two_stage=args.two_stage)
+                               two_stage=args.two_stage,
+                               target_elements=args.target_elements)
         val = action_samples("val", ocr=ocr, count_tokens=count_tokens,
-                             two_stage=args.two_stage)
+                             two_stage=args.two_stage,
+                             target_elements=args.target_elements)
     finally:
         if per is not None:
             save_cache()

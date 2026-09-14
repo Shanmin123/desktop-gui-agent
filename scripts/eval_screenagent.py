@@ -33,6 +33,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gui_agent.agent import parse_step
 from gui_agent.chain import parse_with_target, render_prompt, render_target_prompt
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from build_finetune_data import TARGET_ELEMENTS_LIMIT
 from gui_agent.models import DEFAULT_MODEL, LocalQwenVL
 from gui_agent.perception import Perception, imread, resize_for_model
 from gui_agent.schema import ScreenState
@@ -83,6 +85,12 @@ def main() -> None:
     ap.add_argument("--max-new-tokens", type=int, default=128,
                     help="生成长度上限。之前所有对照都是 128 跑的，默认不动它；"
                          "要看放宽之后的效果就显式传 256")
+    ap.add_argument("--ocr-cpu", action="store_true",
+                    help="OCR 放到 CPU 上跑。带元素清单评测时显卡上同时有模型和 OCR，"
+                         "12 G 的卡会被挤满，然后 WDDM 静默换页——看着 100% 占用，"
+                         "实际一步都不走")
+    ap.add_argument("--target-elements", action="store_true",
+                    help="两段式第一问里带 OCR 元素清单（要配同样训练出来的权重）")
     ap.add_argument("--locate-target", action="store_true",
                     help="两段式：第一段只问要操作哪个控件，第二段用定位提示词换成坐标。"
                          "这是 --locate-target 上线时跑的那条路径，"
@@ -101,7 +109,10 @@ def main() -> None:
 
     # 两段式的提示词里本来就没有元素清单，agent.py 在这条路径上也不跑 OCR，
     # 评测跟着一起关掉才是同一个配置
-    perception = None if (args.no_ocr or args.locate_target) else Perception()
+    # 两段式默认不跑 OCR（提示词里没有清单，agent.py 也是这么做的）；
+    # --target-elements 要用清单，就得跑
+    perception = (None if args.no_ocr or (args.locate_target and not args.target_elements)
+                  else Perception(gpu=not args.ocr_cpu))
 
     n_type_ok = n_parse_fail = 0
     kb_total = kb_hit = 0
@@ -121,8 +132,10 @@ def main() -> None:
             model_img, _ = resize_for_model(img)
 
             instruction = r["instruction_zh"] or r["instruction"]
-            prompt = (render_target_prompt(instruction, []) if args.locate_target
-                      else render_prompt(instruction, state, []))
+            prompt = (render_target_prompt(instruction, [],
+                                           state if args.target_elements else None,
+                                           TARGET_ELEMENTS_LIMIT)
+                      if args.locate_target else render_prompt(instruction, state, []))
             rh, rw = vlm.resized_size(*model_img.shape[:2])
 
             t = time.perf_counter()
@@ -138,9 +151,8 @@ def main() -> None:
                 latencies.append(time.perf_counter() - t)
                 n_parse_fail += 1
                 confusion[(gt["type"], "解析失败")] += 1
-                if args.locate_target:
-                    cases.append({"i": i, "gt": gt["type"], "pred": "解析失败",
-                                  "target": named_target(raw), "why": str(e)[:80]})
+                cases.append({"i": i, "gt": gt["type"], "pred": "解析失败",
+                              "target": named_target(raw), "why": str(e)[:80]})
                 continue
             latencies.append(time.perf_counter() - t)
 
@@ -155,11 +167,11 @@ def main() -> None:
             if gt["type"] in POINTED and pred.type in POINTED and gt.get("point") and pred.point:
                 d = distance(pred.point, tuple(gt["point"]))
                 dists.append(d)
-            if args.locate_target:
-                # 两段式错在哪要看模型报的控件名，光有混淆矩阵查不出来
-                cases.append({"i": i, "gt": gt["type"], "pred": pred.type,
-                              "target": named_target(raw),
-                              "dist": None if d is None else round(d, 3)})
+            # 逐条留痕：类型对不对、点得准不准、两段式报的控件名是什么。
+            # 只有混淆矩阵的话，「类型对了但点偏了」这种查不出来。
+            cases.append({"i": i, "gt": gt["type"], "pred": pred.type,
+                          "target": named_target(raw),
+                          "dist": None if d is None else round(d, 3)})
 
             if (i + 1) % 25 == 0:
                 print(f"  {i+1}/{len(recs)}  类型准确 {n_type_ok}/{i+1} = {n_type_ok/(i+1):.1%}")
@@ -180,6 +192,11 @@ def main() -> None:
         for th in HIT_THRESHOLDS:
             k = sum(d <= th for d in dists)
             print(f"  距离 ≤ {th:.2f}      {k}/{len(dists)} = {k/len(dists):.1%}")
+    # 联合指标：一步要算成功，类型得对，坐标类动作还得点得够准。
+    # 单看类型准确率会高估，单看点击距离又漏掉类型错的那些。
+    joint = sum(1 for c in cases if c["gt"] == c["pred"]
+                and (c.get("dist") is None or c["dist"] <= 0.10))
+    print(f"类型对且点得准   {joint}/{n} = {joint/n:.1%}（坐标类动作要求距离 ≤ 0.10）")
     print(f"平均单条耗时     {sum(latencies)/len(latencies):.2f}s")
 
     print("\n真值类型 -> 预测类型（前 15）：")
@@ -195,6 +212,7 @@ def main() -> None:
         "n": n,
         "with_ocr": perception is not None,
         "locate_target": args.locate_target,
+        "target_elements": args.target_elements,
         "max_new_tokens": args.max_new_tokens,
         "type_accuracy": n_type_ok / n,
         "parse_failures": n_parse_fail,
@@ -207,6 +225,7 @@ def main() -> None:
         "avg_latency_s": sum(latencies) / len(latencies),
         "ground_truth_types": dict(gt_types),
         "confusion": {f"{g}->{p}": c for (g, p), c in confusion.items()},
+        "joint_accuracy": joint / n,
         "cases": cases,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n结果已存到 {out}")
