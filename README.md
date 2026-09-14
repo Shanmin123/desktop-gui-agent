@@ -75,7 +75,7 @@ python scripts/run_tasks.py --live --set complex --plan   # 多步任务，先�
 
 可选开关：`--locate-target` 两段式定位，`--plan` 先拆解子任务，`--cache-ocr` 屏幕没变时
 复用上一次 OCR，`--cv-elements` 用 OpenCV 补图标候选框，`--resolution 1280x720` 临时切
-分辨率（结束后还原），`--adapter checkpoints/lora_2sb` 挂上微调权重。
+分辨率（结束后还原），`--adapter checkpoints/lora_2sp` 挂上微调权重。
 
 ### 微调权重
 
@@ -85,14 +85,14 @@ python scripts/run_tasks.py --live --set complex --plan   # 多步任务，先�
 |---|---|---|---|---|---|
 | 不挂 | 一段式 | 42.2% | 46.6% | 25.4% | 18.1% |
 | `checkpoints/lora_v3` | 一段式（不加 `--locate-target`） | 40.8% | 65.4% | **44.7%** | 26.6% |
-| `checkpoints/lora_2si` | **两段式（要加 `--locate-target`）** | **49.6%** | **78.0%** | 38.6% | **30.6%** |
+| `checkpoints/lora_2sp` | **两段式（要加 `--locate-target`）** | **54.1%** | **81.6%** | 37.3% | **31.4%** |
 
 ```bash
-python scripts/run_tasks.py --live --adapter checkpoints/lora_2si --locate-target
+python scripts/run_tasks.py --live --adapter checkpoints/lora_2sp --locate-target
 ```
 
-`lora_2si` 训的是动作决策和任务拆解，定位（`vlm.locate`）这一段没训过，走基座自带的
-像素 `bbox_2d`：ScreenSpot 上 69.8%，基座是 71.6%。训练与评测的完整对照见
+`lora_2sp` 训的是动作决策和任务拆解，定位（`vlm.locate`）这一段没训过，走基座自带的
+像素 `bbox_2d`，ScreenSpot 上和基座同档（69.8%~71.9%，基座 71.6%）。训练与评测的完整对照见
 `docs/第3周实验报告.md`。
 
 默认 dry-run。`--live` 会真实操作桌面，开始前有倒计时，鼠标甩到屏幕左上角可强制中断。
