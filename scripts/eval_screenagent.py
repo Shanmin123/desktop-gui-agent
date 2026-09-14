@@ -18,6 +18,7 @@
     python scripts/eval_screenagent.py --limit 20   # 先小样本确认跑得通
     python scripts/eval_screenagent.py              # 全量
     python scripts/eval_screenagent.py --adapter checkpoints/lora_v2 --tag lora
+    python scripts/eval_screenagent.py --locate-target --tag base_2s   # 两段式
 """
 
 import argparse
@@ -31,7 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from gui_agent.agent import parse_step
-from gui_agent.chain import render_prompt
+from gui_agent.chain import parse_with_target, render_prompt, render_target_prompt
 from gui_agent.models import DEFAULT_MODEL, LocalQwenVL
 from gui_agent.perception import Perception, imread, resize_for_model
 from gui_agent.schema import ScreenState
@@ -55,6 +56,19 @@ def distance(a, b) -> float:
     return math.dist(a, b)
 
 
+def named_target(raw: str):
+    """模型这一步说要操作哪个控件，取不出来就返回 None。"""
+    from gui_agent.agent import _extract_json
+
+    try:
+        data = _extract_json(raw)
+    except Exception:
+        return None
+    act = data.get("action") if isinstance(data, dict) else None
+    t = act.get("target") if isinstance(act, dict) else None
+    return t.strip() if isinstance(t, str) and t.strip() else None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
@@ -66,10 +80,18 @@ def main() -> None:
                          "用同一个值评测才能看出权重本身的效果")
     ap.add_argument("--no-ocr", action="store_true",
                     help="不跑 OCR，提示词里不带元素清单。默认带，与实际循环一致")
+    ap.add_argument("--max-new-tokens", type=int, default=128,
+                    help="生成长度上限。之前所有对照都是 128 跑的，默认不动它；"
+                         "要看放宽之后的效果就显式传 256")
+    ap.add_argument("--locate-target", action="store_true",
+                    help="两段式：第一段只问要操作哪个控件，第二段用定位提示词换成坐标。"
+                         "这是 --locate-target 上线时跑的那条路径，"
+                         "用它评测才是在量真正部署的配置")
     args = ap.parse_args()
 
     recs = load(args.limit)
-    print(f"评测集 {len(recs)} 条，{len({r['session_id'] for r in recs})} 个 session")
+    print(f"评测集 {len(recs)} 条，{len({r['session_id'] for r in recs})} 个 session"
+          f"{'，两段式' if args.locate_target else ''}")
 
     print(f"加载模型 {args.model} ……")
     t0 = time.perf_counter()
@@ -77,11 +99,13 @@ def main() -> None:
                       max_pixels=args.max_pixels * 28 * 28)
     print(f"  耗时 {time.perf_counter() - t0:.1f}s")
 
-    perception = None if args.no_ocr else Perception()
+    # 两段式的提示词里本来就没有元素清单，agent.py 在这条路径上也不跑 OCR，
+    # 评测跟着一起关掉才是同一个配置
+    perception = None if (args.no_ocr or args.locate_target) else Perception()
 
     n_type_ok = n_parse_fail = 0
     kb_total = kb_hit = 0
-    dists, latencies = [], []
+    dists, latencies, cases = [], [], []
     confusion = Counter()
     gt_types = Counter()
 
@@ -96,19 +120,29 @@ def main() -> None:
             state = ScreenState(width=w, height=h, elements=elements)
             model_img, _ = resize_for_model(img)
 
-            prompt = render_prompt(r["instruction_zh"] or r["instruction"], state, [])
+            instruction = r["instruction_zh"] or r["instruction"]
+            prompt = (render_target_prompt(instruction, []) if args.locate_target
+                      else render_prompt(instruction, state, []))
             rh, rw = vlm.resized_size(*model_img.shape[:2])
 
             t = time.perf_counter()
-            raw = vlm.ask(model_img, prompt)
-            latencies.append(time.perf_counter() - t)
+            raw = vlm.ask(model_img, prompt, max_new_tokens=args.max_new_tokens)
 
             try:
-                _, pred = parse_step(raw, state, model_size=(rw, rh))
-            except ValueError:
+                if args.locate_target:
+                    # 第二段的定位调用也算在这一步的耗时里，两段式本来就要两次前向
+                    _, pred = parse_with_target(raw, vlm, model_img, state, (rw, rh))
+                else:
+                    _, pred = parse_step(raw, state, model_size=(rw, rh))
+            except ValueError as e:
+                latencies.append(time.perf_counter() - t)
                 n_parse_fail += 1
                 confusion[(gt["type"], "解析失败")] += 1
+                if args.locate_target:
+                    cases.append({"i": i, "gt": gt["type"], "pred": "解析失败",
+                                  "target": named_target(raw), "why": str(e)[:80]})
                 continue
+            latencies.append(time.perf_counter() - t)
 
             confusion[(gt["type"], pred.type)] += 1
             n_type_ok += pred.type == gt["type"]
@@ -117,8 +151,15 @@ def main() -> None:
                 kb_total += 1
                 kb_hit += pred.type in KEYBOARD
 
+            d = None
             if gt["type"] in POINTED and pred.type in POINTED and gt.get("point") and pred.point:
-                dists.append(distance(pred.point, tuple(gt["point"])))
+                d = distance(pred.point, tuple(gt["point"]))
+                dists.append(d)
+            if args.locate_target:
+                # 两段式错在哪要看模型报的控件名，光有混淆矩阵查不出来
+                cases.append({"i": i, "gt": gt["type"], "pred": pred.type,
+                              "target": named_target(raw),
+                              "dist": None if d is None else round(d, 3)})
 
             if (i + 1) % 25 == 0:
                 print(f"  {i+1}/{len(recs)}  类型准确 {n_type_ok}/{i+1} = {n_type_ok/(i+1):.1%}")
@@ -152,7 +193,9 @@ def main() -> None:
         "adapter": args.adapter,
         "max_pixels": args.max_pixels,
         "n": n,
-        "with_ocr": not args.no_ocr,
+        "with_ocr": perception is not None,
+        "locate_target": args.locate_target,
+        "max_new_tokens": args.max_new_tokens,
         "type_accuracy": n_type_ok / n,
         "parse_failures": n_parse_fail,
         "keyboard_recall": (kb_hit / kb_total) if kb_total else None,
@@ -164,6 +207,7 @@ def main() -> None:
         "avg_latency_s": sum(latencies) / len(latencies),
         "ground_truth_types": dict(gt_types),
         "confusion": {f"{g}->{p}": c for (g, p), c in confusion.items()},
+        "cases": cases,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n结果已存到 {out}")
 

@@ -95,6 +95,20 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--rank", type=int, default=16)
+    ap.add_argument("--lora-alpha", type=int, default=None,
+                    help="默认 2 倍的 rank。SeeClick 用的是固定 16")
+    ap.add_argument("--lora-dropout", type=float, default=0.05)
+    ap.add_argument("--lora-targets", default="attn", choices=["attn", "all"],
+                    help="attn 只挂注意力的 q/k/v/o；all 连 MLP 一起挂，"
+                         "ShowUI 训 Qwen2-VL 用的就是 all")
+    ap.add_argument("--weight-decay", type=float, default=0.01,
+                    help="AdamW 的默认值是 0.01，SeeClick 用 0.1")
+    ap.add_argument("--adam-beta2", type=float, default=0.999,
+                    help="SeeClick 用 0.95")
+    ap.add_argument("--scheduler", default="onecycle", choices=["onecycle", "cosine"],
+                    help="cosine 是带预热的余弦退火，SeeClick / Aguvis 用的那套")
+    ap.add_argument("--warmup-ratio", type=float, default=0.05,
+                    help="预热占总步数的比例。SeeClick 0.01，Aguvis 0.03")
     ap.add_argument("--accum", type=int, default=8, help="梯度累积步数，等效批大小")
     ap.add_argument("--limit", type=int, default=None, help="只用前 N 条，调试用")
     ap.add_argument("--kinds", default=None,
@@ -120,7 +134,14 @@ def main() -> None:
     ap.add_argument("--load-in-4bit", action="store_true")
     ap.add_argument("--tag", default="lora")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--data-dir", default=None,
+                    help="从哪个目录读 train.jsonl / val.jsonl，默认 data/finetune")
     args = ap.parse_args()
+
+    global DATA
+    if args.data_dir:
+        DATA = Path(args.data_dir)
+
 
     import torch
     from peft import LoraConfig, get_peft_model
@@ -167,9 +188,13 @@ def main() -> None:
         model = PeftModel.from_pretrained(model, args.init_adapter, is_trainable=True)
         print(f"接着 {args.init_adapter} 的权重训")
     else:
+        targets = ["q_proj", "k_proj", "v_proj", "o_proj"]
+        if args.lora_targets == "all":
+            targets += ["gate_proj", "up_proj", "down_proj"]
         model = get_peft_model(model, LoraConfig(
-            r=args.rank, lora_alpha=args.rank * 2, lora_dropout=0.05, bias="none",
-            task_type="CAUSAL_LM", target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]))
+            r=args.rank, lora_alpha=args.lora_alpha or args.rank * 2,
+            lora_dropout=args.lora_dropout, bias="none",
+            task_type="CAUSAL_LM", target_modules=targets))
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -185,10 +210,18 @@ def main() -> None:
         train = [r for r in train if id(r) in keep]
         print(f"按长度预筛掉 {len(too_long)} 条超长样本，剩 {len(train)} 条")
 
-    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr,
+                            weight_decay=args.weight_decay, betas=(0.9, args.adam_beta2))
     total = math.ceil(len(train) * args.epochs / args.accum)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=max(total, 1),
-                                                pct_start=0.05)
+    if args.scheduler == "cosine":
+        from transformers import get_cosine_schedule_with_warmup
+
+        sched = get_cosine_schedule_with_warmup(
+            opt, num_warmup_steps=round(total * args.warmup_ratio),
+            num_training_steps=max(total, 1))
+    else:
+        sched = torch.optim.lr_scheduler.OneCycleLR(
+            opt, max_lr=args.lr, total_steps=max(total, 1), pct_start=args.warmup_ratio)
 
     def evaluate() -> float:
         model.eval()

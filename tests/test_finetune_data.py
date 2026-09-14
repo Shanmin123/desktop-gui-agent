@@ -2,6 +2,7 @@
 
 import json
 import re
+from collections import Counter
 import sys
 from pathlib import Path
 
@@ -267,3 +268,136 @@ def test_norm_coords_grounding_targets_are_ratios():
     import inspect
 
     assert "norm_coords" in inspect.signature(bf.grounding_samples).parameters
+
+
+def test_pixel_grounding_targets_are_integers():
+    """像素口径的框要写成整数：基座模型自己吐的就是整数。
+
+    写成 234.6 等于在「换坐标制」之外又改了一处输出约定，两件事的影响会混在一起，
+    对照实验就说不清是哪一个造成的。
+    """
+    import json as _json
+    from pathlib import Path as _P
+
+    for name in ("finetune", "finetune_px"):
+        p = _P(__file__).resolve().parents[1] / "data" / name / "train.jsonl"
+        if not p.is_file():
+            continue
+        n = 0
+        for line in p.open(encoding="utf-8"):
+            r = _json.loads(line)
+            if r["kind"] != "grounding":
+                continue
+            body = _json.loads(r["response"])
+            if "bbox_2d" not in body:      # 归一化口径不适用
+                continue
+            assert all(isinstance(v, int) for v in body["bbox_2d"]), r["response"]
+            n += 1
+            if n >= 100:
+                break
+
+
+# --- 两段式样本的类型比例 ---------------------------------------------------
+
+
+def _bf():
+    import importlib.util
+    from pathlib import Path as _P
+
+    spec = importlib.util.spec_from_file_location(
+        "bf2", _P(__file__).resolve().parents[1] / "scripts" / "build_finetune_data.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def _fake_screenagent(tmp_path, counts):
+    d = tmp_path / "data" / "screenagent"
+    d.mkdir(parents=True)
+    with (d / "train.jsonl").open("w", encoding="utf-8") as f:
+        for t, n in counts.items():
+            for _ in range(n):
+                f.write(json.dumps({"action": {"type": t}}) + "\n")
+    return tmp_path
+
+
+def _samples(counts):
+    out = []
+    for t, n in counts.items():
+        for i in range(n):
+            out.append({"kind": "action",
+                        "response": json.dumps({"thought": "x", "action": {"type": t}})})
+    return out
+
+
+def test_balance_follows_the_full_sets_share(tmp_path, monkeypatch):
+    """抽完之后各类的占比要贴着整份数据的占比。"""
+    import random as _r
+
+    bf = _bf()
+    monkeypatch.setattr(bf, "ROOT", _fake_screenagent(
+        tmp_path, {"click": 400, "hotkey": 200, "type": 200, "wait": 200}))
+    # 点击只收得上来 100 条，别的都富余
+    got = bf.balance_types(_samples({"click": 100, "hotkey": 200, "type": 200, "wait": 200}),
+                           "train", _r.Random(0))
+    share = {t: sum(1 for r in got
+                    if json.loads(r["response"])["action"]["type"] == t) / len(got)
+             for t in ("click", "hotkey", "type", "wait")}
+    assert share["click"] == pytest.approx(0.4, abs=0.03)
+    for t in ("hotkey", "type", "wait"):
+        assert share[t] == pytest.approx(0.2, abs=0.03)
+
+
+def test_a_starved_minor_type_does_not_shrink_everything(tmp_path, monkeypatch):
+    """少数类只剩几条时，总量不能被它拖垮——它本来就收不上来。"""
+    import random as _r
+
+    bf = _bf()
+    monkeypatch.setattr(bf, "ROOT", _fake_screenagent(
+        tmp_path, {"click": 400, "hotkey": 200, "type": 200, "left_double": 80}))
+    got = bf.balance_types(
+        _samples({"click": 100, "hotkey": 200, "type": 200, "left_double": 2}),
+        "train", _r.Random(0))
+    # 按 left_double 定总量的话只剩 10 条上下；按主要类别定是 100/0.4 = 250 上下
+    assert len(got) > 200
+    kinds = Counter(json.loads(r["response"])["action"]["type"] for r in got)
+    assert kinds["left_double"] == 2        # 有多少收多少
+    assert kinds["click"] == 100
+
+
+def test_balance_never_invents_samples(tmp_path, monkeypatch):
+    """抽样只能少不能多，每条都要来自原始列表。"""
+    import random as _r
+
+    bf = _bf()
+    monkeypatch.setattr(bf, "ROOT", _fake_screenagent(
+        tmp_path, {"click": 400, "hotkey": 200, "type": 400}))
+    src = _samples({"click": 50, "hotkey": 60, "type": 70})
+    got = bf.balance_types(list(src), "train", _r.Random(0))
+    assert len(got) <= len(src)
+    assert all(any(g is s for s in src) for g in got)
+
+
+def test_responses_fit_under_the_generation_cap():
+    """训练目标不能比推理时允许生成的长度还长。
+
+    原来上限是 128 token，而 4~5% 的回答本身就超过 128：生成到一半被截断，JSON
+    收不了尾，两段式那轮 353 条里有 24 条因此记成解析失败。上限改成 256 之后，
+    这条检查保证以后重建数据也不会再越过去。
+    """
+    import json as _json
+    from pathlib import Path as _P
+
+    from transformers import AutoTokenizer
+
+    from gui_agent.models import MAX_NEW_TOKENS
+
+    tok = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-VL-3B-Instruct")
+    for name in ("finetune", "finetune_2sb", "finetune_2sh"):
+        p = _P(__file__).resolve().parents[1] / "data" / name / "train.jsonl"
+        if not p.is_file():
+            continue
+        n = [len(tok(_json.loads(l)["response"])["input_ids"]) for l in p.open(encoding="utf-8")]
+        over = [v for v in n if v > MAX_NEW_TOKENS]
+        assert len(over) / len(n) <= 0.01, \
+            f"{name}: {len(over)}/{len(n)} 条回答超过 {MAX_NEW_TOKENS} token，最长 {max(n)}"

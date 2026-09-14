@@ -37,7 +37,7 @@ DESC = {
  "tests/test_agent.py": "Agent 循环：JSON 提取、动作解析、失败重试、卡住检测、终止条件、截图落盘",
  "tests/test_monitor.py": "执行状态记录：动作描述、每步落盘、崩溃后可读、重试事件",
  "tests/test_tasks.py": "任务集：程序化验收、状态差异比对、跨平台进程操作、复杂任务",
- "tests/test_finetune_data.py": "微调数据构建：样本生成、裁剪窗口、训练验证划分",
+ "tests/test_finetune_data.py": "微调数据构建：样本生成、裁剪窗口、训练验证划分、定位目标的坐标空间、两段式样本的类型配比",
  "tests/test_train_lora.py": "LoRA 训练：提示词屏蔽、标签对齐、显存与步数计算",
  "tests/test_screenagent.py": "ScreenAgent 数据集：原始动作到本项目 Action 的转换",
  "tests/test_webarena.py": "WebArena 数据集：任务规格到本项目格式的转换",

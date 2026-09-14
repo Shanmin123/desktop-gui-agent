@@ -13,6 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import train_lora
 from train_lora import IGNORE, encode, load_rows
 
 
@@ -204,3 +205,40 @@ def test_sortish_batches_shuffles_batch_order():
     b = [len(r["prompt"]) for r in sortish_batches(rows, 4, random.Random(7))]
     assert a != b, "两个不同种子应给出不同的批顺序"
     assert a != sorted(a), "不能是整体升序"
+
+
+# --- 超参开关（照 SeeClick / ShowUI 的做法加的）-----------------------------
+
+
+def _parser_args(argv):
+    """跑一遍 main 的参数解析，不真的训练。"""
+    import argparse
+    import inspect
+    import re
+
+    src = inspect.getsource(train_lora.main)
+    body = src.split("args = ap.parse_args()")[0]
+    body = body.split("ap = argparse.ArgumentParser()")[1]
+    ap = argparse.ArgumentParser()
+    ns = {"ap": ap, "argparse": argparse}
+    exec(re.sub(r"^    ", "", body, flags=re.M), ns)
+    return ap.parse_args(argv)
+
+
+def test_lora_alpha_defaults_to_twice_the_rank():
+    a = _parser_args(["--rank", "32"])
+    assert a.lora_alpha is None      # 空着就在建 LoraConfig 时取 2 倍
+    assert _parser_args(["--lora-alpha", "16"]).lora_alpha == 16
+
+
+def test_target_modules_switch_covers_the_mlp():
+    """ShowUI 训 Qwen2-VL 时 LoRA 是挂满整个语言模型的，不只注意力。"""
+    assert _parser_args([]).lora_targets == "attn"
+    assert _parser_args(["--lora-targets", "all"]).lora_targets == "all"
+
+
+def test_optimizer_knobs_have_the_old_defaults():
+    """默认值必须和加开关之前一致，否则前面几轮的结果就不能比了。"""
+    a = _parser_args([])
+    assert a.weight_decay == 0.01 and a.adam_beta2 == 0.999
+    assert a.scheduler == "onecycle" and a.warmup_ratio == 0.05

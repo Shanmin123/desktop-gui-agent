@@ -82,7 +82,8 @@ def fit_prompt(instruction, state, history, count_tokens, response="") -> tuple:
     return prompt, ELEMENT_STEPS[-1]
 
 
-def action_samples(split: str, ocr=None, count_tokens=None) -> list:
+def action_samples(split: str, ocr=None, count_tokens=None,
+                   two_stage: bool = False) -> list:
     """ScreenAgent 的可执行动作 -> 训练样本。
 
     三处和第一版不同，都是照着第一版掉分的原因改的：
@@ -97,6 +98,12 @@ def action_samples(split: str, ocr=None, count_tokens=None) -> list:
 
     真值点落在某个 OCR 元素里就用 element 编号，否则给 point——提示词要求的就是
     这个取舍，让模型学会什么时候该用编号。
+
+    two_stage=True 换成两段式那套：提示词是 `chain.render_target_prompt`，回答里
+    位置写成 `"target": "控件名"`，坐标交给第二段的定位提示词解析。这样动作决策
+    归微调管，定位仍然走基座自带的那套（ScreenSpot 71.6%，微调过动作也还有
+    69.5%），两边各用各的长处。代价是点击类动作只有真值点落在有文字的 OCR 元素
+    里才收得进来，其余的没有可写的控件名。
     """
     src = ROOT / "data" / "screenagent" / f"{split}.jsonl"
     if not src.is_file():
@@ -129,6 +136,15 @@ def action_samples(split: str, ocr=None, count_tokens=None) -> list:
             # 挑编号。顺序反过来的话，清单被裁短之后编号可能已经不在清单里了——
             # 那就是在教模型输出它看不到的编号（第一次 141 条里错了 4 条，
             # 加了自适应裁剪后错 21 条）。
+            step = Step(state, Action.from_dict(r["action"]), ok=True, changed=True)
+            if two_stage:
+                sample = target_sample(instruction, state, history, act, thought)
+                if sample is not None:
+                    sample["image"] = image
+                    out.append(sample)
+                history.append(step)
+                continue
+
             resp = json.dumps({"thought": thought, "action": act}, ensure_ascii=False)
             prompt, used = fit_prompt(instruction, state, list(history), count_tokens, resp)
             eid = element_at(select_elements(state, used), act["point"])                 if act.get("point") else None
@@ -146,8 +162,66 @@ def action_samples(split: str, ocr=None, count_tokens=None) -> list:
                 "prompt": prompt,
                 "response": resp,
             })
-            history.append(Step(state, Action.from_dict(r["action"]), ok=True, changed=True))
+            history.append(step)
     return out
+
+
+def balance_types(samples: list, split: str, rng) -> list:
+    """按整份动作数据的类型比例抽样，把类型分布掰回来。
+
+    两段式样本只能收「真值点落在有文字的 OCR 元素里」那些点击，图标点击全丢了：
+    623 条里点击只剩 129 条（21%），而整份数据里点击占 40%。分布一歪，模型就学成
+    了按训练集的先验猜——实测 `click` 被答成 `hotkey` 51 次。
+
+    做法是以整份数据的比例为准，按最缺的那一类定总量，其余类按比例抽。
+    """
+    src = ROOT / "data" / "screenagent" / f"{split}.jsonl"
+    ref = Counter(json.loads(l)["action"]["type"] for l in src.open(encoding="utf-8"))
+    total_ref = sum(ref.values())
+    by_type = {}
+    for r in samples:
+        by_type.setdefault(json.loads(r["response"])["action"]["type"], []).append(r)
+
+    # 总量由主要类别里最紧的那一类定（整份数据里占比 ≥10% 的：click / hotkey / type）。
+    # 让 left_double 这类只剩 5 条的少数类去定总量的话，总量会被压到 63 条——
+    # 它本来就收不上来，不该拖着别人一起缩。少数类有多少收多少，不超过比例。
+    major = [t for t, c in ref.items() if c / total_ref >= 0.10 and t in by_type]
+    if not major:                      # 没有一类占得上 10%，就退回所有出现过的类
+        major = [t for t in by_type if ref.get(t)]
+    if not major:
+        return list(samples)
+    k = min(len(by_type[t]) / (ref[t] / total_ref) for t in major)
+    out = []
+    for t, rows in by_type.items():
+        want = min(len(rows), round(k * ref.get(t, 0) / total_ref))
+        rng.shuffle(rows)
+        out += rows[:max(want, 0)]
+    rng.shuffle(out)
+    return out
+
+
+def target_sample(instruction, state, history, act, thought):
+    """一条两段式的动作样本，位置写成控件名。收不进来就返回 None。"""
+    from gui_agent.chain import NEEDS_TARGET, render_target_prompt
+
+    act = dict(act)
+    if act["type"] in NEEDS_TARGET:
+        if not act.get("point"):
+            return None
+        el = element_containing(state.elements, act["point"])
+        if el is None:
+            return None        # 没有文字的图标，写不出控件名
+        act = {k: v for k, v in act.items() if k not in ("point", "point2", "element")}
+        act["target"] = el.text.strip()
+    elif act.get("point"):
+        return None            # drag 之类只有坐标的，两段式给不出单个控件名
+    return {
+        "kind": "action",
+        "source": "screenagent",
+        "elements_shown": 0,
+        "prompt": render_target_prompt(instruction, list(history)),
+        "response": json.dumps({"thought": thought, "action": act}, ensure_ascii=False),
+    }
 
 
 OCR_CACHE = ROOT / "data" / "screenagent" / "_ocr_cache.json"
@@ -181,14 +255,20 @@ def cached_ocr(ocr):
     return run, save
 
 
-def element_at(elements, point):
-    """真值点落在哪个元素里，返回最小的那个的编号，没有就返回 None。"""
+def element_containing(elements, point):
+    """真值点落在哪个元素里，返回最小的那个，没有就返回 None。"""
     x, y = point
     hit = [e for e in elements
            if e.bbox[0] <= x <= e.bbox[2] and e.bbox[1] <= y <= e.bbox[3] and e.text.strip()]
     if not hit:
         return None
-    return min(hit, key=lambda e: (e.bbox[2] - e.bbox[0]) * (e.bbox[3] - e.bbox[1])).id
+    return min(hit, key=lambda e: (e.bbox[2] - e.bbox[0]) * (e.bbox[3] - e.bbox[1]))
+
+
+def element_at(elements, point):
+    """同上，只要编号。"""
+    e = element_containing(elements, point)
+    return e.id if e is not None else None
 
 
 def plan_samples(split: str) -> list:
@@ -353,7 +433,9 @@ def grounding_samples(split: str, limit=None, seed: int = 42,
                                else GROUNDING_PROMPT).format(instruction=desc),
                     "response": json.dumps(
                         {"point": pt} if norm_coords
-                        else {"bbox_2d": [round(v, 1) for v in cb]}, ensure_ascii=False),
+                        # 基座模型自己吐的框就是整数，目标写成小数等于多改了一处
+                        # 输出约定，会和「换坐标制」的影响混在一起
+                        else {"bbox_2d": [int(round(v)) for v in cb]}, ensure_ascii=False),
                 })
     return out, skip
 
@@ -379,12 +461,36 @@ def main() -> None:
                          "要靠 smart_resize 换算，训练和推理的 max_pixels 一不同就整体偏掉")
     ap.add_argument("--no-ocr", action="store_true",
                     help="动作样本的提示词里不带元素清单。带清单要先跑一遍 OCR")
+    ap.add_argument("--balance-types", action="store_true",
+                    help="两段式样本按整份动作数据的类型比例抽样。两段式收不了图标"
+                         "点击，不抽的话点击只占 21%%，模型会按这个先验猜")
+    ap.add_argument("--ocr-from-cache", action="store_true",
+                    help="元素清单只从 data/screenagent/_ocr_cache.json 读，不加载识别"
+                         "模型。显卡正忙着别的实验时用，缓存缺图就直接报错")
+    ap.add_argument("--two-stage", action="store_true",
+                    help="动作样本改用两段式：提示词只问要操作哪个控件，回答里位置"
+                         "写成 target 控件名，坐标留给第二段的定位提示词。"
+                         "定位这一段仍然用基座自带的能力，不动它")
+    ap.add_argument("--out", default=None,
+                    help="train.jsonl / val.jsonl 写到哪。做对照组时换个目录，"
+                         "免得把正在用的那份盖掉。裁剪图仍然共用 data/finetune/crops")
     args = ap.parse_args()
+
+    global OUT
+    if args.out:
+        OUT = Path(args.out)
     random.seed(args.seed)
 
     ocr = None
     per = None
-    if not args.no_ocr:
+    save_cache = None
+    if args.ocr_from_cache:
+        def _miss(_img):
+            raise SystemExit("OCR 缓存里没有这张图，去掉 --ocr-from-cache 重跑")
+
+        print("只用磁盘上的 OCR 缓存，不加载识别模型")
+        ocr, _ = cached_ocr(_miss)
+    elif not args.no_ocr:
         from gui_agent.perception import Perception
 
         print("动作样本的提示词要带元素清单，先跑一遍 OCR ……")
@@ -399,12 +505,19 @@ def main() -> None:
         # 图片那部分 token 另算，预算留给文本
         count_tokens = lambda s: len(tok(s)["input_ids"])
     try:
-        train = action_samples("train", ocr=ocr, count_tokens=count_tokens)
-        val = action_samples("val", ocr=ocr, count_tokens=count_tokens)
+        train = action_samples("train", ocr=ocr, count_tokens=count_tokens,
+                               two_stage=args.two_stage)
+        val = action_samples("val", ocr=ocr, count_tokens=count_tokens,
+                             two_stage=args.two_stage)
     finally:
         if per is not None:
             save_cache()
             per.close()
+    if args.balance_types:
+        before = Counter(json.loads(r["response"])["action"]["type"] for r in train)
+        train = balance_types(train, "train", random)
+        after = Counter(json.loads(r["response"])["action"]["type"] for r in train)
+        print(f"按类型比例抽样：{dict(before)} -> {dict(after)}")
     print(f"动作样本（ScreenAgent）：训练 {len(train)}，验证 {len(val)}")
 
     if not args.no_plan:

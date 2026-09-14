@@ -33,6 +33,11 @@ GROUNDING_PROMPT = (
     "坐标为图片中的像素值。不要输出任何其他内容。"
 )
 
+# 生成长度上限。原来是 128，而微调样本里 4~5% 的回答本身就超过 128 token
+# （thought 写得长的那些），生成到一半被截断，JSON 收不了尾，评测里记成解析失败。
+# 两段式那轮 353 条里有 24 条是这么丢的。
+MAX_NEW_TOKENS = 256
+
 GROUNDING_PROMPT_NORM = (
     "请在截图中找到「{instruction}」对应的界面元素，"
     "只返回一个 JSON 对象，格式为 {{\"point\": [x, y]}}，"
@@ -190,7 +195,8 @@ class LocalQwenVL:
             height, width, factor=28, min_pixels=self.min_pixels, max_pixels=self.max_pixels
         )
 
-    def ask(self, image: np.ndarray, prompt: str, max_new_tokens: int = 128) -> str:
+    def ask(self, image: np.ndarray, prompt: str,
+            max_new_tokens: int = MAX_NEW_TOKENS) -> str:
         from PIL import Image
 
         pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
@@ -259,7 +265,8 @@ class OpenAICompatVLM:
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
 
-    def ask(self, image: np.ndarray, prompt: str, max_new_tokens: int = 128) -> str:
+    def ask(self, image: np.ndarray, prompt: str,
+            max_new_tokens: int = MAX_NEW_TOKENS) -> str:
         b64 = base64.b64encode(encode_jpeg(image)).decode()
         resp = self.client.chat.completions.create(
             model=self.model,

@@ -16,7 +16,8 @@
   10 拆解样本为空或有重复子任务
 
 用法：
-    python scripts/audit_finetune_data.py
+    python scripts/audit_finetune_data.py                  # data/finetune
+    python scripts/audit_finetune_data.py data/finetune_2sb
 """
 
 import json, re, sys
@@ -28,7 +29,8 @@ sys.path.insert(0, str(ROOT))
 from gui_agent.schema import Action
 
 def load(split):
-    return [json.loads(l) for l in (ROOT/"data"/"finetune"/f"{split}.jsonl").open(encoding="utf-8")]
+    d = sys.argv[1] if len(sys.argv) > 1 else "data/finetune"
+    return [json.loads(l) for l in (ROOT/d/f"{split}.jsonl").open(encoding="utf-8")]
 
 train, val = load("train"), load("val")
 problems = []
@@ -65,11 +67,17 @@ leak = ({r["image"] for r in train} | {r["image"] for r in val}) & test_imgs
 if leak: issue("评测用的 test 截图出现在训练或验证集里", len(leak))
 
 # 6 动作样本：编号必须在清单里，动作必须能解析
-bad_eid = bad_act = 0
+# 两段式样本的位置写成 target 控件名，坐标是推理时第二段解析出来的，schema 里
+# 没有这一项，不能按解析失败算——但控件名必须是非空字符串，而且不能再带坐标。
+bad_eid = bad_act = bad_target = 0
 for r in train + val:
     if r["kind"] != "action": continue
     act = json.loads(r["response"])["action"]
-    if "element" in act:
+    if "target" in act:
+        t = act["target"]
+        if not (isinstance(t, str) and t.strip()) or {"point", "element"} & set(act):
+            bad_target += 1
+    elif "element" in act:
         shown = {int(m) for m in re.findall(r"^\s*\[(\d+)\]", r["prompt"], re.M)}
         if act["element"] not in shown: bad_eid += 1
     else:
@@ -77,6 +85,7 @@ for r in train + val:
         except Exception: bad_act += 1
 if bad_eid: issue("动作样本的 element 编号不在提示词清单里", bad_eid)
 if bad_act: issue("动作样本的动作解析不出来", bad_act)
+if bad_target: issue("两段式样本的 target 是空的、或者还带着坐标", bad_target)
 
 # 7 thought 里泄漏坐标
 leak_xy = sum(1 for r in train + val if r["kind"] == "action"
