@@ -92,7 +92,7 @@ python scripts/run_tasks.py --live --adapter checkpoints/lora_2si --locate-targe
 ```
 
 `lora_2si` 训的是动作决策和任务拆解，定位（`vlm.locate`）这一段没训过，走基座自带的
-像素 `bbox_2d`，ScreenSpot 上 71.9%，和基座的 71.6% 持平。训练与评测的完整对照见
+像素 `bbox_2d`：ScreenSpot 上 69.8%，基座是 71.6%。训练与评测的完整对照见
 `docs/第3周实验报告.md`。
 
 默认 dry-run。`--live` 会真实操作桌面，开始前有倒计时，鼠标甩到屏幕左上角可强制中断。
