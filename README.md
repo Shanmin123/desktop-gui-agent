@@ -81,11 +81,11 @@ python scripts/run_tasks.py --live --set complex --plan   # 多步任务，先�
 
 **权重和提示词是配套的，挂错路径会掉十几个点**，ScreenAgent test 353 条上实测：
 
-| 权重 | 配套路径 | 动作类型准确 | 键盘召回 | 点击距离均值 | 距离 ≤0.10 |
+| 权重 | 配套路径 | 动作类型准确 | 键盘召回 | 距离 ≤0.10 | 类型对且点得准 |
 |---|---|---|---|---|---|
-| 不挂 | 一段式 | 42.2% | 46.6% | 0.324 | 25.4% |
-| `checkpoints/lora_v3` | 一段式（不加 `--locate-target`） | 40.5% | 64.8% | **0.215** | **44.9%** |
-| `checkpoints/lora_2si` | **两段式（要加 `--locate-target`）** | **49.6%** | **78.0%** | 0.234 | 38.6% |
+| 不挂 | 一段式 | 42.2% | 46.6% | 25.4% | 18.1% |
+| `checkpoints/lora_v3` | 一段式（不加 `--locate-target`） | 40.8% | 65.4% | **44.7%** | 26.6% |
+| `checkpoints/lora_2si` | **两段式（要加 `--locate-target`）** | **49.6%** | **78.0%** | 38.6% | **30.6%** |
 
 ```bash
 python scripts/run_tasks.py --live --adapter checkpoints/lora_2si --locate-target
