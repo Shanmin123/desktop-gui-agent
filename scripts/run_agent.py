@@ -54,11 +54,15 @@ def main() -> None:
                     help="屏幕没变就复用上一次的 OCR 结果")
     ap.add_argument("--cv-elements", action="store_true",
                     help="额外用 OpenCV 找图标候选框，让没文字的控件也有编号")
-    ap.add_argument("--locate-target", action="store_true",
-                    help="两段式定位：先让模型说要操作哪个控件，再用定位提示词解析坐标")
+    ap.add_argument("--locate-target", action="store_true", default=True,
+                    help="两段式定位（默认，留着这个开关是为了旧命令还能跑）：先让模型说要操作哪个"
+                         "控件，再用定位提示词解析坐标；执行和拆解都不跑 OCR")
+    ap.add_argument("--one-stage", action="store_true",
+                    help="一段式：提示词带 OCR 元素清单，模型回编号或坐标。只用来复现第 2、3 周的对照")
     ap.add_argument("--plan", action="store_true",
                     help="先把任务拆成子任务再逐个执行，每步判一次完成度")
     args = ap.parse_args()
+    args.locate_target = not args.one_stage
 
     if args.live:
         print(f"将真实操作桌面，{args.delay} 秒后开始。鼠标甩到屏幕左上角可强制中断。")
@@ -71,11 +75,10 @@ def main() -> None:
     vlm = load_vlm(args)
     print(f"  耗时 {time.perf_counter() - t0:.1f}s\n")
 
-    if args.cv_elements and args.locate_target and not args.plan:
-        # 两段式定位的提示词里没有元素清单，那条路径根本不跑 OCR，候选框生成了也没人看。
-        # 不提示的话这个开关是静默失效的——第 3 周的实验就这么白开了一轮。
-        print("注意：--cv-elements 配合 --locate-target 不起作用，两段式不看元素清单。"
-              "要用候选框就去掉 --locate-target，或者加 --plan（拆解那一步会看清单）。\n")
+    if (args.cv_elements or args.cache_ocr) and args.locate_target:
+        # 两段式的动作提示词和拆解提示词都不带元素清单，整条任务不跑 OCR，这两个开关不起作用。
+        # 不提示的话是静默失效的——第 3 周的实验就这么白开了一轮。
+        print("注意：两段式不跑 OCR，--cv-elements / --cache-ocr 不起作用；要用就加 --one-stage。\n")
     perception = Perception(cache_ocr=args.cache_ocr,
                             cv_elements=args.cv_elements)
     controller = Controller(backend=PyAutoGUIBackend(), dry_run=not args.live)

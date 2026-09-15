@@ -407,3 +407,37 @@ def test_keyboard_action_with_text_still_parses(screen):
         vlm, None, screen)
     assert act.type == "hotkey" and act.text == "ctrl+s" and act.point is None
     assert vlm.located == []
+
+
+# --- 两段式提示词变体（大纲第 5 周第 4 项）------------------------------------
+
+
+def test_target_variants_keep_placeholders_and_differ_from_base():
+    from gui_agent.chain import TARGET_VARIANTS
+
+    assert {"base", "keyboard", "click_prior", "few_shot"} <= set(TARGET_VARIANTS)
+    for name, tpl in TARGET_VARIANTS.items():
+        assert "{instruction}" in tpl and "{history}" in tpl, name
+        if name != "base":
+            assert tpl != TARGET_VARIANTS["base"], name
+
+
+def test_target_variants_render_and_base_stays_the_old_prompt():
+    from gui_agent.chain import TARGET_VARIANTS, render_target_prompt
+
+    base = render_target_prompt("打开浏览器", [])
+    assert render_target_prompt("打开浏览器", [], variant="base") == base
+    for name in TARGET_VARIANTS:
+        p = render_target_prompt("打开浏览器", [], variant=name)
+        assert "打开浏览器" in p and "{instruction}" not in p, name
+    assert "ctrl+s" in render_target_prompt("打开浏览器", [], variant="keyboard")
+    assert "left_double" in render_target_prompt("打开浏览器", [], variant="click_prior")
+
+
+def test_unknown_target_variant_is_rejected():
+    import pytest as _pytest
+
+    from gui_agent.chain import render_target_prompt
+
+    with _pytest.raises(ValueError):
+        render_target_prompt("x", [], variant="nope")

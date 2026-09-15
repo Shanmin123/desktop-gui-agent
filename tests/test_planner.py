@@ -461,3 +461,38 @@ def test_coverage_rewards_matching_steps_and_ignores_extras():
     assert ep.coverage(ref, ref + ["再打开记事本"]) == 1.0
     # 漏了一条，覆盖率应明显下降
     assert ep.coverage(ref, ["打开浏览器"]) < 0.7
+
+
+# --- 执行路径去掉 OCR 之后 ----------------------------------------------------
+
+
+def _one_element_state():
+    return ScreenState(width=1024, height=768,
+                       elements=[Element(id=0, bbox=(0, 0, 0.1, 0.1), text="文件菜单")])
+
+
+def test_planner_without_elements_writes_the_training_placeholder():
+    from gui_agent.planner import NO_ELEMENTS, Planner
+
+    vlm = ScriptedVLM(['["打开记事本"]'])
+    Planner(vlm, use_elements=False).plan(np.zeros((10, 10, 3), dtype=np.uint8), "写日记",
+                                          _one_element_state())
+    assert NO_ELEMENTS in vlm.prompts[0] and "文件菜单" not in vlm.prompts[0]
+
+
+def test_planner_with_elements_still_lists_them():
+    from gui_agent.planner import Planner
+
+    vlm = ScriptedVLM(['["打开记事本"]'])
+    Planner(vlm).plan(np.zeros((10, 10, 3), dtype=np.uint8), "写日记", _one_element_state())
+    assert "文件菜单" in vlm.prompts[0]
+
+
+def test_placeholder_is_the_same_sentence_used_for_training_and_offline_eval():
+    import pathlib
+
+    from gui_agent.planner import NO_ELEMENTS
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    for rel in ("scripts/build_finetune_data.py", "scripts/eval_plan.py"):
+        assert NO_ELEMENTS in (root / rel).read_text(encoding="utf-8"), rel

@@ -249,6 +249,8 @@ class Agent:
         self.max_steps = max_steps
         self.repeat_limit = repeat_limit
         self.shot_dir = shot_dir  # 给了就每步存一张截图，微调样本要有配对的图
+        self._shot_traj: Optional[Trajectory] = None  # 截图名里的运行编号，每条轨迹定一次
+        self._shot_key: Optional[int] = None
         # 先把任务拆成子任务再逐个执行。默认关：v1.0 的基线是在单步循环上测的，
         # 默认打开会让基线描述的不再是默认配置。规划的效果单独作为一组对照来测。
         self.plan = plan
@@ -309,14 +311,20 @@ class Agent:
         if not self.shot_dir:
             return None
         stem = re.sub(r"[^\w.-]", "_", traj.task_id)[:32]  # task_id 来自指令，未必能当文件名
-        run = f"{int(traj.started_at * 1000) % 10**9:09d}"
-        return str(Path(self.shot_dir) / f"{stem}_{run}_{traj.n_steps:02d}.png")
+        if traj is not self._shot_traj:
+            key = int(traj.started_at * 1000) % 10**9
+            # 两次运行的开始时间落在同一毫秒（假模型跑得快，Windows 上 time.time() 也不细）
+            # 就顺延一位，不然后一次还是会盖掉前一次
+            if key == self._shot_key:
+                key = (key + 1) % 10**9
+            self._shot_traj, self._shot_key = traj, key
+        return str(Path(self.shot_dir) / f"{stem}_{self._shot_key:09d}_{traj.n_steps:02d}.png")
 
     def run(self, instruction: str, task_id: str = "") -> Trajectory:
         traj = Trajectory(task_id=task_id or instruction[:24], instruction=instruction)
         self.monitor.task_start(instruction, traj.task_id)
         last_state = ScreenState(width=0, height=0)
-        planner = Planner(self.vlm) if self.plan else None
+        planner = Planner(self.vlm, use_elements=not self.locate_target) if self.plan else None
         planned = False  # 第一次感知拿到屏幕后才能拆解
         fails = 0        # 连续失败步数，成功一步就清零
         stalls = 0       # 当前子任务连续判定「没推进」的次数
@@ -324,9 +332,9 @@ class Agent:
         for _ in range(self.max_steps):
             t0 = time.perf_counter()
             try:
-                # 两段式定位的提示词里没有元素清单，这一步的 OCR 结果没人用，1280x720
-                # 下白花 0.71s。只有拆解子任务那一次要看清单，单独判一下。
-                need_ocr = not self.locate_target or (planner is not None and not planned)
+                # 两段式的动作提示词和拆解提示词都不带 OCR 元素清单，整条任务不跑 OCR
+                # （1280x720 下每步省 0.71 s，也不占显存）；只有一段式要跑
+                need_ocr = not self.locate_target
                 state, model_img = self.perception.perceive(
                     run_ocr=need_ocr, save_to=self._shot_path(traj))
                 last_state = state
@@ -438,8 +446,8 @@ class Agent:
                     try:
                         # 按执行后的屏幕重拆。need_reformulate 的意思就是「看到现在
                         # 的情况，原计划走不通」，拿动作执行前的屏幕重拆没有意义。
-                        # 这里要带 OCR：拆解的提示词里有元素清单。
-                        fresh, fresh_img = self.perception.perceive()
+                        # 一段式的拆解提示词里有元素清单，要带 OCR；两段式不带。
+                        fresh, fresh_img = self.perception.perceive(run_ocr=not self.locate_target)
                         planner.plan(fresh_img, instruction, fresh)
                         traj.subtasks = list(planner.subtasks)
                     except Exception as e:

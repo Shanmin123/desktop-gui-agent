@@ -179,6 +179,47 @@ target 写界面上那个控件本身，比如「保存按钮」「地址栏」�
 
 TARGET_PROMPT = PromptTemplate.from_template(TARGET_TEMPLATE)
 
+# --- 两段式的提示词变体（大纲第 5 周第 4 项；交付路径是两段式）------------------
+#
+# 对着一段式那几个变体的同样假设：键盘动作用得太少、单击被答成双击、给例子能不能稳住
+# 格式。都只改「只问点什么」的第一问，定位提示词不变。
+
+_TARGET_RULE = """target 写界面上那个控件本身，比如「保存按钮」「地址栏」「左上角的关闭图标」。
+不要写坐标，也不要写编号，位置由另一步解析。"""
+
+_TARGET_KEYBOARD_RULE = _TARGET_RULE + """
+
+能用快捷键完成的就别去点菜单：保存 ctrl+s、全选 ctrl+a、复制粘贴 ctrl+c / ctrl+v、
+新建 ctrl+n、关闭 ctrl+w。要输入文字用 type，不要一个字一个字点。"""
+
+_TARGET_CLICK_RULE = _TARGET_RULE + """
+
+绝大多数控件是单击：按钮、菜单、标签页、输入框、工具栏图标、链接，都用 click。
+只有打开文件、文件夹、桌面图标才用 left_double。不确定就用 click。"""
+
+_TARGET_EXAMPLES = """
+两个例子（只是示范格式，和当前任务无关）：
+任务「保存文件」，屏幕上没有可见的保存按钮 ->
+{{"thought": "记事本用 ctrl+s 保存最快", "action": {{"type": "hotkey", "text": "ctrl+s"}}}}
+任务「关掉这个窗口」 ->
+{{"thought": "窗口右上角有关闭按钮", "action": {{"type": "click", "target": "窗口右上角的关闭按钮"}}}}
+"""
+
+
+def _target_variant(old: str, new: str) -> str:
+    out = TARGET_TEMPLATE.replace(old, new)
+    if out == TARGET_TEMPLATE:
+        raise AssertionError("两段式提示词变体没替换成功，模板改过了就要同步改这里")
+    return out
+
+
+TARGET_VARIANTS = {
+    "base": TARGET_TEMPLATE,
+    "keyboard": _target_variant(_TARGET_RULE, _TARGET_KEYBOARD_RULE),
+    "click_prior": _target_variant(_TARGET_RULE, _TARGET_CLICK_RULE),
+    "few_shot": _target_variant("任务：{instruction}", _TARGET_EXAMPLES + "任务：{instruction}"),
+}
+
 # 带元素清单的变体。两段式的失败样例里，错的主要不是定位，是模型报出来的控件名
 # 本身不对——它凭印象写，写出 "Firefox W..." 这种截断的、屏幕上并不存在的字符串，
 # 第二段自然定位不到。把 OCR 认出来的文字列出来让它照抄，比让它自己想要稳。
@@ -202,7 +243,8 @@ NEEDS_TARGET = ("click", "left_double", "right_single", "scroll")
 
 def render_target_prompt(instruction: str, steps: List[Step],
                          state: Optional[ScreenState] = None,
-                         elements_limit: Optional[int] = None) -> str:
+                         elements_limit: Optional[int] = None,
+                         variant: str = "base") -> str:
     """两段式里第一段的提示词：只问点什么，不问点哪。
 
     给了 state 就把 OCR 元素清单一并列出来，让模型照抄原文当 target；不给就是
@@ -210,8 +252,12 @@ def render_target_prompt(instruction: str, steps: List[Step],
     """
     from .agent import MAX_ELEMENTS, format_elements, format_history
 
+    if variant not in TARGET_VARIANTS:
+        raise ValueError(f"没有 {variant!r} 这个两段式提示词变体，可选 {list(TARGET_VARIANTS)}")
     if state is None:
-        return TARGET_PROMPT.format(instruction=instruction, history=format_history(steps))
+        prompt = (TARGET_PROMPT if variant == "base"
+                  else PromptTemplate.from_template(TARGET_VARIANTS[variant]))
+        return prompt.format(instruction=instruction, history=format_history(steps))
     return TARGET_WITH_ELEMENTS_PROMPT.format(
         instruction=instruction, history=format_history(steps),
         elements=format_elements(state, MAX_ELEMENTS if elements_limit is None

@@ -34,7 +34,7 @@ ALLOWED_FLAGS = {
     "--live", "--only", "--set", "--max-steps", "--repeat", "--model", "--api-base", "--api-key",
     "--api-qwen", "--api-coord-space", "--tag", "--no-detect-change", "--inject-failures",
     "--retry-limit", "--cache-ocr", "--cv-elements", "--locate-target", "--plan", "--shots",
-    "--resolution",
+    "--resolution", "--one-stage",
 }
 VALUE = re.compile(r"^[\w.:/\-]+$")
 SUBDIRS = ("jobs", "running", "done", "out", "results")

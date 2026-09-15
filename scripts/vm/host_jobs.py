@@ -8,7 +8,7 @@
 用法（宿主机，-- 后面是交给虚拟机里 run_tasks.py 的参数）：
     python scripts/vm/host_jobs.py --vm agent-win11 --snapshot clean ^
         --serve-model Qwen/Qwen3.5-4B --serve-adapter checkpoints/q35_2sp --id q35_2sp_suite -- ^
-        --live --set suite --repeat 3 --locate-target --resolution 1280x720 ^
+        --live --set suite --repeat 3 --resolution 1280x720 ^
         --api-base http://10.0.2.2:8000/v1 --api-key local --api-coord-space rel1000 ^
         --tag vm_q35_2sp_suite
 """

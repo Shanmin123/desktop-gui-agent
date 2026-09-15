@@ -27,6 +27,10 @@ from .schema import ScreenState, Step
 
 MAX_SUBTASKS = 8
 
+# 不带 OCR 时，拆解提示词里元素清单那一栏写这句。构建训练样本和离线拆解评测用的是同一句，
+# 模型在训练、评测、执行里见到的一致。
+NO_ELEMENTS = "  （这一步不看元素清单）"
+
 SUCCESS, RETRY, REFORMULATE = "sub_task_success", "need_retry", "need_reformulate"
 SITUATIONS = (SUCCESS, RETRY, REFORMULATE)
 
@@ -161,9 +165,11 @@ def acting_instruction(task: str, subtask: Optional[str]) -> str:
 class Planner:
     """按顺序推进一串子任务。"""
 
-    def __init__(self, vlm, max_subtasks: int = MAX_SUBTASKS) -> None:
+    def __init__(self, vlm, max_subtasks: int = MAX_SUBTASKS, use_elements: bool = True) -> None:
         self.vlm = vlm
         self.max_subtasks = max_subtasks
+        # 两段式执行时不跑 OCR，拆解也不附元素清单，模型直接看截图拆
+        self.use_elements = use_elements
         self.subtasks: List[str] = []
         self.index = 0
         self.replans = 0
@@ -181,7 +187,7 @@ class Planner:
 
         prompt = PLAN_TEMPLATE.format(
             instruction=instruction,
-            elements=format_elements(state),
+            elements=format_elements(state) if self.use_elements else NO_ELEMENTS,
             max_subtasks=self.max_subtasks,
         )
         got = parse_plan(self.vlm.ask(image, prompt), self.max_subtasks)

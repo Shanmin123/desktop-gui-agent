@@ -21,6 +21,11 @@ def test_validate_args_accepts_a_normal_suite_run():
     assert W.validate_args(args) == args
 
 
+def test_validate_args_accepts_the_one_stage_baseline():
+    args = ["--live", "--set", "basic", "--one-stage", "--tag", "vm_one_stage"]
+    assert W.validate_args(args) == args
+
+
 @pytest.mark.parametrize("args", [
     ["--live", "--exec", "calc"],               # 不认识的参数
     ["--tag", "a b"],                           # 值里有空格

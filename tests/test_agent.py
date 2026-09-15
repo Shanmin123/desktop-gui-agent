@@ -408,6 +408,19 @@ def test_repeated_runs_do_not_overwrite_each_others_shots(screen, tmp_path):
     assert len(list(tmp_path.glob("*.png"))) == 4
 
 
+def test_runs_starting_in_the_same_millisecond_get_different_shot_names(screen, tmp_path):
+    """开始时间落在同一毫秒的两次运行（上面那条测试偶发失败就是这样），截图名也不能撞。"""
+    from gui_agent.schema import Trajectory
+
+    a = Agent(SavingPerception(screen), Controller(backend=RecordingBackend(), dry_run=True),
+              FakeVLM([]), shot_dir=str(tmp_path))
+    first = Trajectory(task_id="same_task", instruction="x", started_at=1789486922.0209846)
+    second = Trajectory(task_id="same_task", instruction="x", started_at=1789486922.0209846)
+    p = a._shot_path(first)
+    assert a._shot_path(first) == p, "同一条轨迹每步要用同一个编号"
+    assert a._shot_path(second) != p
+
+
 def test_failsafe_aborts_the_whole_run(screen):
     """急停要一路传到调用方，不能被循环记成一条失败步然后继续。"""
     import pyautogui
@@ -772,11 +785,21 @@ def test_two_stage_skips_ocr(screen):
     assert per.ocr_flags == [False, False]
 
 
-def test_two_stage_with_plan_runs_ocr_once(screen):
-    """拆解子任务要看元素清单，只有那一次要跑。"""
+def test_two_stage_with_plan_never_runs_ocr(screen):
+    """两段式连拆解也不附元素清单：整条任务不跑 OCR，拆解提示词写的是训练样本里那句占位。"""
+    from gui_agent.planner import NO_ELEMENTS
+
     per = RecordingPerception(screen)
 
-    class Planning(FakeVLM):
+    class Planning:
+        def __init__(self, replies):
+            self.replies = list(replies)
+            self.prompts = []
+
+        def ask(self, image, prompt, **kw):
+            self.prompts.append(prompt)
+            return self.replies.pop(0) if self.replies else '{"action": {"type": "finished"}}'
+
         def locate(self, image, instruction):
             return (0.5, 0.5)
 
@@ -786,8 +809,8 @@ def test_two_stage_with_plan_runs_ocr_once(screen):
                     '{"action": {"type": "finished"}}'])
     Agent(per, Controller(backend=RecordingBackend(), dry_run=True), vlm,
           locate_target=True, plan=True, detect_change=False).run("x")
-    assert per.ocr_flags[0] is True, "第一步要拿元素清单去拆解"
-    assert not any(per.ocr_flags[1:]), "拆完之后就不需要了"
+    assert per.ocr_flags and not any(per.ocr_flags)
+    assert NO_ELEMENTS in vlm.prompts[0]
 
 
 # --- 元素编号写成浮点 -------------------------------------------------------
