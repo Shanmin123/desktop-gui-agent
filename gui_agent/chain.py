@@ -260,6 +260,15 @@ def parse_with_target(text: str, vlm, image, state: ScreenState,
     target = raw.get("target") if isinstance(raw, dict) else None
 
     kind = str(raw.get("type", "click")) if isinstance(raw, dict) else "click"
+    if (kind in ("type", "hotkey") and isinstance(target, str) and target.strip()
+            and not str(raw.get("text") or "").strip()):
+        # 键盘动作把内容写进了 target：lora_2sp 离线 353 条里缺 text 的 6 条全是这样
+        # （Control_L+a、Tab、迈腾……），端到端 5 个任务里有 9 步因此失败、重试还连着犯。
+        # 两段式样本 45% 带 target，把键名带偏了；训练数据里 160 条键盘动作一条都没带
+        # target。内容本身是对的，就当 text 用——仍然不去定位、不挂坐标。
+        rest = {k: v for k, v in raw.items() if k not in ("target", "element", "point", "point2")}
+        rest["text"] = target.strip()
+        return str(data.get("thought", "")), Action.from_dict({**rest, "type": kind})
     if not (isinstance(target, str) and target.strip()) or kind not in NEEDS_TARGET:
         # 没给 target，或者给了但这个动作根本不需要位置（type / hotkey 这些），
         # 就按一段式那套再解析一次。后一种是实测出来的：第一问里列了元素清单之后，

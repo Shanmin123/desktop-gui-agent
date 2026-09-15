@@ -365,19 +365,37 @@ def test_element_limit_is_honoured_in_the_target_prompt():
     assert "[9]" in p and "[10]" not in p
 
 
-def test_target_on_a_keyboard_action_is_ignored(screen):
-    """键盘动作不需要位置：模型给了 target 也不能往上套坐标。
+def test_hotkey_content_written_into_target_is_used_as_text(screen):
+    """键盘动作不需要位置：模型把按键写进 target 时，当 text 用，不去定位、不挂坐标。
 
-    第一问里列了元素清单之后，模型会把 hotkey 写成带 target 的样子。原来的解析
-    会给它安一个 point，掩盖掉真正的问题（缺 text）；现在按原样报缺字段。
+    实测 lora_2sp 离线缺 text 的 6 条全是把内容写进了 target（Control_L+a、Tab）。
     """
     from gui_agent.chain import parse_with_target
 
     vlm = LocatingVLM("", point=(0.5, 0.5))
-    with pytest.raises(ValueError, match="text"):
-        parse_with_target('{"thought": "存盘", "action": {"type": "hotkey", "target": "保存"}}',
-                          vlm, None, screen)
+    _, act = parse_with_target(
+        '{"thought": "全选", "action": {"type": "hotkey", "target": "Control_L+a"}}',
+        vlm, None, screen)
+    assert act.type == "hotkey" and act.text == "Control_L+a" and act.point is None
     assert vlm.located == []          # 根本不该去定位
+
+
+def test_typed_content_written_into_target_is_used_as_text(screen):
+    from gui_agent.chain import parse_with_target
+
+    vlm = LocatingVLM("", point=(0.5, 0.5))
+    _, act = parse_with_target('{"action": {"type": "type", "target": "迈腾"}}', vlm, None, screen)
+    assert act.type == "type" and act.text == "迈腾" and act.point is None
+    assert vlm.located == []
+
+
+def test_keyboard_action_with_neither_text_nor_target_still_fails(screen):
+    """两样都没有就没有内容可用，照样报缺 text，不能凭空补。"""
+    from gui_agent.chain import parse_with_target
+
+    vlm = LocatingVLM("", point=(0.5, 0.5))
+    with pytest.raises(ValueError, match="text"):
+        parse_with_target('{"action": {"type": "hotkey"}}', vlm, None, screen)
 
 
 def test_keyboard_action_with_text_still_parses(screen):
