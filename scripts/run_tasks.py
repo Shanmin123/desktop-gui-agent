@@ -31,6 +31,7 @@ from gui_agent.monitor import Monitor
 from gui_agent.display import resolution as use_resolution
 from gui_agent.models import DEFAULT_MODEL, FlakyVLM, add_backend_args, load_vlm
 from gui_agent.perception import Perception
+from gui_agent.suite import suite_tasks
 from gui_agent.tasks import basic_tasks, complex_tasks
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,8 +41,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--live", action="store_true", help="真的操作桌面，默认只打印")
     ap.add_argument("--only", default=None, help="只跑指定 id 的任务")
-    ap.add_argument("--set", default="basic", choices=["basic", "complex", "all"],
-                    help="basic 是第 4 周的 5 个基础任务，complex 是第 6 周要拆解的多步任务")
+    ap.add_argument("--set", default="basic", choices=["basic", "complex", "all", "suite"],
+                    help="basic 是第 4 周的 5 个基础任务，complex 是第 6 周要拆解的多步任务，"
+                         "suite 是第 7 周的 25 个任务评测集（分 T1/T2/T3 三档）")
     ap.add_argument("--max-steps", type=int, default=12)
     ap.add_argument("--repeat", type=int, default=1, help="每个任务重复跑几次")
     add_backend_args(ap)
@@ -67,7 +69,8 @@ def main() -> None:
     args = ap.parse_args()
 
     pool = {"basic": basic_tasks, "complex": complex_tasks,
-            "all": lambda: basic_tasks() + complex_tasks()}[args.set]()
+            "all": lambda: basic_tasks() + complex_tasks(),
+            "suite": suite_tasks}[args.set]()
     tasks = [t for t in pool if args.only in (None, t.id)]
     if not tasks:
         raise SystemExit(f"没有 id 为 {args.only} 的任务")
@@ -118,7 +121,7 @@ def main() -> None:
                     """跑不起来也要留一条记录，否则它从分母里消失，成功率会虚高。"""
                     print(f"   {reason}")
                     records.append({
-                        "task": task.id, "run": run + 1, "passed": False,
+                        "task": task.id, "level": task.level, "run": run + 1, "passed": False,
                         "steps": 0, "wall_time": 0.0, "actions": [], "error": reason,
                     })
 
@@ -154,7 +157,7 @@ def main() -> None:
                 print(f"   验收：{'通过' if passed else '不通过'}   {traj.n_steps} 步 "
                       f"{traj.wall_time:.1f}s")
                 records.append({
-                    "task": task.id, "run": run + 1, "passed": passed,
+                    "task": task.id, "level": task.level, "run": run + 1, "passed": passed,
                     "steps": traj.n_steps, "wall_time": round(traj.wall_time, 2),
                     "actions": [s.action.type for s in traj.steps],
                     "retries": traj.retries,

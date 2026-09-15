@@ -100,7 +100,11 @@ def file_contains(path: Path, keyword: str) -> bool:
 
 @dataclass
 class Task:
-    """一个任务。setup 返回执行前的状态快照，check 拿它和执行后对比。"""
+    """一个任务。setup 返回执行前的状态快照，check 拿它和执行后对比。
+
+    level 是第 7 周评测集里的难度档（T1/T2/T3，见 gui_agent/suite.py），单独跑基础或
+    复杂任务时为空。
+    """
 
     id: str
     instruction: str
@@ -108,6 +112,7 @@ class Task:
     setup: Callable[[], Dict] = lambda: {}
     teardown: Callable[[], None] = lambda: None
     note: str = ""
+    level: str = ""
 
 
 def _scratch() -> Path:
@@ -119,8 +124,9 @@ def _scratch() -> Path:
 _OWN_NOTEPADS: Set[int] = set()
 
 
-def _open_notepad() -> int:
-    pid = subprocess.Popen(list(EDITOR)).pid
+def _open_notepad(path: Path | None = None) -> int:
+    """启动文本编辑器，给了路径就直接打开那个文件。"""
+    pid = subprocess.Popen(list(EDITOR) + ([str(path)] if path else [])).pid
     _OWN_NOTEPADS.add(pid)
     return pid
 
