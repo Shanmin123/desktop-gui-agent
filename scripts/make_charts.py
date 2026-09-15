@@ -79,25 +79,35 @@ def _plt():
 
 
 def _bars(plt, groups, series, title, ylabel, path):
-    """groups：横轴分组名；series：[(图例名, [每组的值或 None])]。"""
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    width = 0.8 / max(len(series), 1)
+    """groups：横轴分组名；series：[(图例名, [每组的值或 None])]。
+
+    每组四根柱子以上时，横着写的百分比会叠在一起、图例会盖住柱子：数字改竖着写，图例放到图下面。
+    """
+    n = max(len(series), 1)
+    crowded = n >= 4
+    fig, ax = plt.subplots(figsize=(max(9, 0.35 * n * len(groups)), 5 if crowded else 4.5))
+    width = 0.8 / n
     for i, (label, values) in enumerate(series):
-        xs = [g + (i - (len(series) - 1) / 2) * width for g in range(len(groups))]
+        xs = [g + (i - (n - 1) / 2) * width for g in range(len(groups))]
         ys = [v if v is not None else 0 for v in values]
         rects = ax.bar(xs, ys, width, label=label)
         for rect, v in zip(rects, values):
             if v is not None:
                 ax.annotate(f"{v:.0%}", (rect.get_x() + rect.get_width() / 2, rect.get_height()),
-                            ha="center", va="bottom", fontsize=7)
+                            xytext=(0, 2), textcoords="offset points", ha="center", va="bottom",
+                            fontsize=6 if crowded else 7, rotation=90 if crowded else 0)
     ax.set_xticks(range(len(groups)))
     ax.set_xticklabels(groups)
-    ax.set_ylim(0, 1.05)
+    ax.set_ylim(0, 1.18 if crowded else 1.05)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    ax.legend(fontsize=8)
+    if crowded:
+        below = -0.22 if any("\n" in g for g in groups) else -0.12
+        ax.legend(fontsize=8, loc="upper center", bbox_to_anchor=(0.5, below), ncol=3, frameon=False)
+    else:
+        ax.legend(fontsize=8)
     fig.tight_layout()
-    fig.savefig(path, dpi=150)
+    fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 

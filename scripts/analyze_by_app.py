@@ -168,10 +168,11 @@ def main() -> None:
     except ImportError:
         return
     charts.OUT.mkdir(parents=True, exist_ok=True)
+    # 图只画两段式（交付的执行路径），一段式的数在表里：六组柱子挤在一张图上读不清
     series = [(label, [results[label]["by_app"].get(app, {}).get("type_accuracy") for app in APPS])
-              for label in labels]
+              for label in labels if "两段式" in label]
     charts._bars(plt, [f"{a}\n({counts[a]} 步)" for a in APPS], series,
-                 "ScreenAgent test 353 步：按应用类型的动作类型准确率", "准确率",
+                 "ScreenAgent test 353 步：按应用类型的动作类型准确率（两段式）", "准确率",
                  charts.OUT / "screenagent_by_app.png")
     print(f"图已存到 {charts.OUT / 'screenagent_by_app.png'}")
 
