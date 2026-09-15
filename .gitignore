@@ -17,6 +17,8 @@ logs/*
 *.png
 *.jpg
 *.mp4
+# 报告里引用的图表要入库，文档在仓库里才看得到图
+!docs/figures/*.png
 
 # 规划文件，不入库
 task_plan.md
