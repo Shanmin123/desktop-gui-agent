@@ -506,3 +506,18 @@ def test_adapter_cannot_be_mounted_on_another_base(tmp_path):
     check_adapter_base(str(tmp_path), r"D:\models\Qwen2.5-VL-3B-Instruct")   # 本地路径，同名
     with pytest.raises(ValueError, match="Qwen3.5-4B"):
         check_adapter_base(str(tmp_path), "Qwen/Qwen3.5-4B")
+
+
+def test_coord_space_registry_matches_the_probe():
+    """口径是 scripts/probe_model.py 实测后登记的，改之前要重新量。"""
+    from gui_agent.models import COORD_SPACE_BY_MODEL_TYPE, COORD_SPACES
+
+    assert COORD_SPACE_BY_MODEL_TYPE["qwen2_5_vl"] == "pixel"
+    assert COORD_SPACE_BY_MODEL_TYPE["qwen3_5"] == "rel1000"
+    assert set(COORD_SPACE_BY_MODEL_TYPE.values()) <= set(COORD_SPACES)
+
+
+def test_parse_box_reads_qwen35_list_output():
+    """Qwen3.5 回的是代码块里的列表，每项带 label。"""
+    raw = '```json\n[\n\t{"bbox_2d": [954, 150, 984, 200], "label": "close"}\n]\n```'
+    assert parse_box(raw) == (954, 150, 984, 200)

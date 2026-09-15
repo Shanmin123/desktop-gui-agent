@@ -4,8 +4,9 @@
 
 两种后端共用一个 `ask(image, prompt) -> str` 接口，上层不关心模型跑在哪。
 
-Qwen2.5-VL 输出的坐标位于它内部 smart_resize 之后的像素空间，不是原图像素。归一化
-时要用同一个 smart_resize 算出的尺寸，正确性由 scripts/eval_grounding.py 验证。
+定位坐标的口径随模型而定：Qwen2.5-VL 回的是 smart_resize 之后的像素值，归一化要用同一个
+smart_resize 算出的尺寸；Qwen3.5 回的是 0~1000 的相对值。口径登记在
+COORD_SPACE_BY_MODEL_TYPE，正确性由 scripts/eval_grounding.py 验证。
 """
 
 from __future__ import annotations
@@ -141,10 +142,12 @@ def box_center(box) -> Tuple[float, float]:
 
 # 定位坐标的口径：模型回的坐标除以什么才是 0~1。
 #   pixel    缩放后图片上的像素值，Qwen2.5-VL 预训练就是这样
-#   rel1000  0~1000 的相对值
-# 口径由预训练定死，提示词改不动（第 3 周实测）。新模型先用探针量出来再登记；
+#   rel1000  0~1000 的相对值，Qwen3.5 是这样
+# 口径由预训练定死，提示词改不动。新模型先用 scripts/probe_model.py 量出来再登记；
 # 没登记的一律按 pixel 处理并提示。
-COORD_SPACE_BY_MODEL_TYPE = {"qwen2_5_vl": "pixel"}
+# Qwen3.5-4B 实测（ScreenSpot 抽 40 条）：按 1000 换算命中 32 条，按缩放后像素 6 条、
+# 按原图像素 3 条；提示词写不写「像素值」、用中文还是英文，三组结果一样。
+COORD_SPACE_BY_MODEL_TYPE = {"qwen2_5_vl": "pixel", "qwen3_5": "rel1000"}
 COORD_SPACES = ("pixel", "rel1000")
 
 
