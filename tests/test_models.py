@@ -521,3 +521,25 @@ def test_parse_box_reads_qwen35_list_output():
     """Qwen3.5 回的是代码块里的列表，每项带 label。"""
     raw = '```json\n[\n\t{"bbox_2d": [954, 150, 984, 200], "label": "close"}\n]\n```'
     assert parse_box(raw) == (954, 150, 984, 200)
+
+
+def test_api_locate_divides_by_1000_for_rel1000_servers():
+    """服务端是 Qwen3.5 这类 0~1000 口径时，框中心除以 1000，与图多大无关。"""
+    m = _stub(OpenAICompatVLM, '{"bbox_2d": [0, 0, 1000, 1000]}',
+              min_pixels=None, max_pixels=None, coord_space="rel1000")
+    assert m.coord_size(400, 800) == (1000, 1000)
+    assert m.locate(np.zeros((400, 800, 3), dtype=np.uint8), "整块屏幕") == pytest.approx((0.5, 0.5))
+
+
+def test_api_without_coord_space_keeps_the_image_size():
+    m = _stub(OpenAICompatVLM, "", min_pixels=None, max_pixels=None)
+    assert m.coord_size(400, 800) == (400, 800)
+
+
+def test_api_coord_space_flag_reaches_the_backend(monkeypatch):
+    from gui_agent import models
+
+    seen = {}
+    monkeypatch.setattr(models, "OpenAICompatVLM", lambda **kw: seen.update(kw))
+    models.load_vlm(_args(api_base="http://x/v1", api_key="k", api_coord_space="rel1000"))
+    assert seen["coord_space"] == "rel1000" and seen["min_pixels"] is None

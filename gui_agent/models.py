@@ -56,7 +56,10 @@ def add_backend_args(ap) -> None:
     ap.add_argument("--api-key", default=None,
                     help="API 密钥，默认读环境变量 OPENAI_API_KEY")
     ap.add_argument("--api-qwen", action="store_true",
-                    help="服务端跑的是 Qwen 系列，坐标按 smart_resize 尺寸归一化")
+                    help="服务端跑的是 Qwen2.5-VL，坐标按 smart_resize 尺寸归一化")
+    ap.add_argument("--api-coord-space", default=None, choices=["pixel", "rel1000"],
+                    help="服务端模型回的定位坐标口径：pixel 是 smart_resize 之后的像素值（Qwen2.5-VL），"
+                         "rel1000 是 0~1000 的相对值（Qwen3.5）。都不给时按原图尺寸算")
     ap.add_argument("--adapter", default=None,
                     help="LoRA 权重目录，如 checkpoints/lora。给了就在基座上挂适配器")
 
@@ -73,9 +76,11 @@ def load_vlm(args):
     key = args.api_key or os.environ.get("OPENAI_API_KEY")
     if not key:
         raise SystemExit("走 API 需要 --api-key，或设环境变量 OPENAI_API_KEY")
-    px = (256 * 28 * 28, 1280 * 28 * 28) if args.api_qwen else (None, None)
+    coord_space = getattr(args, "api_coord_space", None)
+    px = ((256 * 28 * 28, 1280 * 28 * 28) if args.api_qwen or coord_space == "pixel"
+          else (None, None))
     return OpenAICompatVLM(base_url=args.api_base, api_key=key, model=args.model,
-                           min_pixels=px[0], max_pixels=px[1])
+                           min_pixels=px[0], max_pixels=px[1], coord_space=coord_space)
 
 
 def encode_jpeg(img: np.ndarray, quality: int = 85) -> bytes:
@@ -329,6 +334,7 @@ class OpenAICompatVLM:
         timeout: int = 60,
         min_pixels: Optional[int] = None,
         max_pixels: Optional[int] = None,
+        coord_space: Optional[str] = None,
     ) -> None:
         from openai import OpenAI
 
@@ -336,6 +342,7 @@ class OpenAICompatVLM:
         self.model = model
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
+        self.coord_space = coord_space
 
     def ask(self, image: np.ndarray, prompt: str,
             max_new_tokens: int = MAX_NEW_TOKENS) -> str:
@@ -374,6 +381,12 @@ class OpenAICompatVLM:
             height, width, factor=28, min_pixels=self.min_pixels, max_pixels=self.max_pixels
         )
 
+    def coord_size(self, height: int, width: int) -> Tuple[int, int]:
+        """服务端模型回的坐标要除以的数 (高方向, 宽方向)。rel1000 口径两边都是 1000，其余同 resized_size。"""
+        if getattr(self, "coord_space", None) == "rel1000":
+            return 1000, 1000
+        return self.resized_size(height, width)
+
     def locate(self, image: np.ndarray, instruction: str) -> Optional[Tuple[float, float]]:
         """给一句话，返回归一化的点击点，找不到返回 None。
 
@@ -389,7 +402,7 @@ class OpenAICompatVLM:
         if box is None:
             return None
         h, w = image.shape[:2]
-        rh, rw = self.resized_size(h, w)
+        rh, rw = self.coord_size(h, w)
         cx, cy = box_center(box)
         return min(max(cx / rw, 0.0), 1.0), min(max(cy / rh, 0.0), 1.0)
 
