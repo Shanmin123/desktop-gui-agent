@@ -176,7 +176,14 @@ def main() -> None:
     out = ROOT / "logs" / f"tasks_{args.tag}{suffix}{'' if args.live else '_dryrun'}.json"
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(
+        # 把这一轮的配置一并记下来：之前几轮只记了 live/model，事后对不上是哪套开关
+        # 跑出来的数，只能翻命令行历史。
         {"live": args.live, "model": args.model,
+         "adapter": getattr(args, "adapter", None),
+         "locate_target": args.locate_target, "plan": args.plan,
+         "cache_ocr": args.cache_ocr, "cv_elements": args.cv_elements,
+         "resolution": args.resolution, "max_steps": args.max_steps,
+         "detect_change": not args.no_detect_change,
          "inject_failures": args.inject_failures,
          "retry_limit": args.retry_limit,
          "success_rate": n_ok / total if total else 0, "records": records},
