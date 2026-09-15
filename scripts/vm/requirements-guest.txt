@@ -1,0 +1,11 @@
+# 虚拟机（客户机）里只跑智能体的执行循环和任务验收，模型在宿主机上（scripts/serve_vlm.py），
+# 所以这里不装 torch / transformers。两段式定位不跑 OCR，也不需要 easyocr。
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+psutil
+langchain-core
+mss
+pyautogui
+pyperclip
+pygetwindow
+openai
