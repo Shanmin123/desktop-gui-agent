@@ -136,7 +136,8 @@ def answer_only(batch) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct")
+    ap.add_argument("--model", default="Qwen/Qwen3.5-4B",
+                    help="基座；Qwen2.5-VL-3B-Instruct 作对照时显式指定")
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--rank", type=int, default=16)

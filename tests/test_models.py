@@ -141,10 +141,12 @@ def test_encode_jpeg_quality_affects_size():
     assert len(encode_jpeg(img, quality=95)) > len(encode_jpeg(img, quality=20))
 
 
-def test_default_model_is_a_qwen_vl():
-    from gui_agent.models import DEFAULT_MODEL
+def test_default_model_is_qwen35_with_its_coordinate_space_registered():
+    """默认基座是 Qwen3.5-4B；它的定位坐标口径得已经登记，否则 locate 会按错的除数换算。"""
+    from gui_agent.models import COORD_SPACE_BY_MODEL_TYPE, DEFAULT_MODEL
 
-    assert "Qwen" in DEFAULT_MODEL and "VL" in DEFAULT_MODEL
+    assert DEFAULT_MODEL == "Qwen/Qwen3.5-4B"
+    assert COORD_SPACE_BY_MODEL_TYPE["qwen3_5"] == "rel1000"
 
 
 # --- locate 的坐标空间 ------------------------------------------------------
