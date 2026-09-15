@@ -225,6 +225,12 @@ class LocalQwenVL:
             kwargs.pop("dtype")
 
         self.model = AutoModelForImageTextToText.from_pretrained(model_id, **kwargs)
+        gen = self.model.generation_config
+        if gen.pad_token_id is None:
+            # Qwen3.5 的生成配置里没写 pad，generate 每调一次就提示一遍再拿 eos 顶上。
+            # 这里照同样的规则先设好，输出不变，日志里不再刷屏
+            eos = gen.eos_token_id
+            gen.pad_token_id = eos[0] if isinstance(eos, (list, tuple)) else eos
         if coord_space is None:
             model_type = getattr(self.model.config, "model_type", "")
             coord_space = COORD_SPACE_BY_MODEL_TYPE.get(model_type)

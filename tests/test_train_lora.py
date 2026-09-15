@@ -317,3 +317,15 @@ def test_est_tokens_counts_image_by_patch_factor(tmp_path):
     assert train_lora.est_tokens(row, tok, 10_000, factor=32) == 100
     assert train_lora.est_tokens(row, tok, 10_000, factor=28) == (320 * 320) // (28 * 28)
     assert train_lora.est_tokens(row, tok, 50, factor=32) == 50
+
+
+def test_lora_qkvo_targets_skip_linear_attention_on_qwen35():
+    got = _matched(train_lora.lora_target_regex(QWEN35_NAMES, "qkvo"), QWEN35_NAMES)
+    assert got == {"model.language_model.layers.3.self_attn.q_proj",
+                   "model.language_model.layers.3.self_attn.o_proj"}
+
+
+def test_lora_qkvo_equals_attn_on_qwen25():
+    """Qwen2.5 没有线性注意力，两种写法挂到的层一样。"""
+    assert (_matched(train_lora.lora_target_regex(QWEN25_NAMES, "qkvo"), QWEN25_NAMES)
+            == _matched(train_lora.lora_target_regex(QWEN25_NAMES, "attn"), QWEN25_NAMES))

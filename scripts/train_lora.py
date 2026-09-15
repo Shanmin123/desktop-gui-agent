@@ -54,7 +54,11 @@ def lora_target_regex(linear_names, which: str = "attn") -> str:
     视觉塔一律不挂：Qwen2.5-VL 视觉塔的 MLP 也叫 gate_proj / up_proj / down_proj，
     按名字列表匹配会连它一起挂上。
     """
-    want = ATTENTION_PROJ + (MLP_PROJ if which == "all" else ())
+    if which == "qkvo":
+        # 只挂全注意力。Qwen3.5 里 32 层只有 8 层是全注意力，用来对照「线性注意力要不要挂」
+        want = ("q_proj", "k_proj", "v_proj", "o_proj")
+    else:
+        want = ATTENTION_PROJ + (MLP_PROJ if which == "all" else ())
     found = sorted({n.rsplit(".", 1)[-1] for n in linear_names
                     if "visual" not in n and n.rsplit(".", 1)[-1] in want})
     if not found:
@@ -123,9 +127,10 @@ def main() -> None:
     ap.add_argument("--lora-alpha", type=int, default=None,
                     help="默认 2 倍的 rank。SeeClick 用的是固定 16")
     ap.add_argument("--lora-dropout", type=float, default=0.05)
-    ap.add_argument("--lora-targets", default="attn", choices=["attn", "all"],
-                    help="attn 只挂注意力的 q/k/v/o；all 连 MLP 一起挂，"
-                         "ShowUI 训 Qwen2-VL 用的就是 all")
+    ap.add_argument("--lora-targets", default="attn", choices=["attn", "qkvo", "all"],
+                    help="attn 挂语言模型里全部注意力投影（Qwen2.5-VL 是 q/k/v/o，Qwen3.5 另含"
+                         "线性注意力的 in_proj_*/out_proj）；qkvo 只挂全注意力的 q/k/v/o；"
+                         "all 再加 MLP，ShowUI 训 Qwen2-VL 用的就是 all")
     ap.add_argument("--weight-decay", type=float, default=0.01,
                     help="AdamW 的默认值是 0.01，SeeClick 用 0.1")
     ap.add_argument("--adam-beta2", type=float, default=0.999,
