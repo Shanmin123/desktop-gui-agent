@@ -40,8 +40,30 @@ def load_rows(split: str, limit=None) -> list:
     return rows[:limit] if limit else rows
 
 
-def est_tokens(row: dict, tokenizer, max_pixels_blocks: int) -> int:
-    """估一条样本的 token 数：文本实算，图片按 28x28 的块数算（不超过上限）。
+# 注意力里的投影层。全注意力是 q/k/v/o；Qwen3.5 另有 24 层线性注意力（Gated DeltaNet），
+# 投影叫 in_proj_qkv / in_proj_z / in_proj_a / in_proj_b / out_proj——只挂 q/k/v/o 的话
+# 32 层里只碰得到 8 层。
+ATTENTION_PROJ = ("q_proj", "k_proj", "v_proj", "o_proj",
+                  "in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj")
+MLP_PROJ = ("gate_proj", "up_proj", "down_proj")
+
+
+def lora_target_regex(linear_names, which: str = "attn") -> str:
+    """语言模型里实际存在的投影层，拼成 PEFT 的 target_modules 正则。
+
+    视觉塔一律不挂：Qwen2.5-VL 视觉塔的 MLP 也叫 gate_proj / up_proj / down_proj，
+    按名字列表匹配会连它一起挂上。
+    """
+    want = ATTENTION_PROJ + (MLP_PROJ if which == "all" else ())
+    found = sorted({n.rsplit(".", 1)[-1] for n in linear_names
+                    if "visual" not in n and n.rsplit(".", 1)[-1] in want})
+    if not found:
+        raise ValueError(f"模型里找不到要挂 LoRA 的投影层（{which}）")
+    return r"^(?!.*visual).*\.(" + "|".join(found) + r")$"
+
+
+def est_tokens(row: dict, tokenizer, max_pixels_blocks: int, factor: int = 28) -> int:
+    """估一条样本的 token 数：文本实算，图片按 factor×factor 的块数算（不超过上限）。
 
     只读图片头拿尺寸，不解码，1000 多条不到一秒。
     """
@@ -50,7 +72,7 @@ def est_tokens(row: dict, tokenizer, max_pixels_blocks: int) -> int:
     with Image.open(row["image"]) as im:
         w, h = im.size
     return (len(tokenizer(row["prompt"] + row["response"])["input_ids"])
-            + min(max_pixels_blocks, (w * h) // (28 * 28)))
+            + min(max_pixels_blocks, (w * h) // (factor * factor)))
 
 
 def sortish_batches(rows: list, accum: int, rng) -> list:
@@ -73,7 +95,10 @@ def encode(processor, row: dict, max_len: int):
     img = Image.open(row["image"]).convert("RGB")
     msgs = [{"role": "user", "content": [{"type": "image", "image": img},
                                          {"type": "text", "text": row["prompt"]}]}]
-    head = processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    # 和推理时一样关掉思考模式：Qwen3.5 的生成提示因此以空的 <think></think> 结尾，
+    # 回答紧接其后，屏蔽长度才和推理时的输入对得上
+    head = processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True,
+                                         enable_thinking=False)
     answer = row["response"] + "<|im_end|>"
 
     full = processor(text=[head + answer], images=[img], return_tensors="pt")
@@ -115,8 +140,8 @@ def main() -> None:
                     help="只用这些类型的样本，逗号分隔，如 action,plan。调配比用")
     ap.add_argument("--max-len", type=int, default=2048, help="超长样本直接跳过")
     ap.add_argument("--max-pixels", type=int, default=1280,
-                    help="送进模型的图片上限，单位是 28x28 的块。1024x768 的截图在"
-                         "默认 1280 下展开成 1004 个 token，是样本长度的大头")
+                    help="送进模型的图片上限，单位是视觉 token 数（Qwen2.5-VL 一个 token 是"
+                         "28×28 像素，Qwen3.5 是 32×32）。图片 token 是样本长度的大头")
     ap.add_argument("--mem-fraction", type=float, default=0.8,
                     help="限制本进程能用的显存比例。Windows 的 WDDM 在显存超额时会"
                          "静默换页到主机内存，不报 OOM 只是慢几百倍——限住之后直接"
@@ -145,7 +170,7 @@ def main() -> None:
 
     import torch
     from peft import LoraConfig, get_peft_model
-    from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+    from transformers import AutoModelForImageTextToText, AutoProcessor
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -176,9 +201,11 @@ def main() -> None:
             load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4")
     else:
         kwargs["dtype"] = torch.bfloat16
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(args.model, **kwargs)
+    model = AutoModelForImageTextToText.from_pretrained(args.model, **kwargs)
+    ip = AutoProcessor.from_pretrained(args.model).image_processor
+    factor = int(getattr(ip, "patch_size", 14) or 14) * int(getattr(ip, "merge_size", 2) or 2)
     processor = AutoProcessor.from_pretrained(
-        args.model, min_pixels=256 * 28 * 28, max_pixels=args.max_pixels * 28 * 28)
+        args.model, min_pixels=256 * factor * factor, max_pixels=args.max_pixels * factor * factor)
     print(f"  耗时 {time.perf_counter() - t0:.1f}s，"
           f"显存 {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
 
@@ -188,9 +215,9 @@ def main() -> None:
         model = PeftModel.from_pretrained(model, args.init_adapter, is_trainable=True)
         print(f"接着 {args.init_adapter} 的权重训")
     else:
-        targets = ["q_proj", "k_proj", "v_proj", "o_proj"]
-        if args.lora_targets == "all":
-            targets += ["gate_proj", "up_proj", "down_proj"]
+        targets = lora_target_regex(
+            [n for n, m in model.named_modules() if isinstance(m, torch.nn.Linear)], args.lora_targets)
+        print(f"LoRA 目标：{targets}")
         model = get_peft_model(model, LoraConfig(
             r=args.rank, lora_alpha=args.lora_alpha or args.rank * 2,
             lora_dropout=args.lora_dropout, bias="none",
@@ -203,7 +230,7 @@ def main() -> None:
     # 先按长度筛一遍，再算总步数。不筛的话超长样本在训练时被 encode 丢掉，
     # 实际更新次数比 total 少（上一轮 105 次对 156 次），OneCycleLR 的学习率
     # 就退不到底。
-    too_long = [r for r in train if est_tokens(r, processor.tokenizer, args.max_pixels)
+    too_long = [r for r in train if est_tokens(r, processor.tokenizer, args.max_pixels, factor)
                 > args.max_len]
     if too_long:
         keep = {id(r) for r in train} - {id(r) for r in too_long}
@@ -236,7 +263,11 @@ def main() -> None:
         return sum(losses) / len(losses) if losses else float("nan")
 
     OUTPUT.mkdir(exist_ok=True)
-    log = {"args": vars(args), "train_size": len(train), "kinds": kinds, "steps": []}
+    n_lora = sum(1 for _, m in model.named_modules() if hasattr(m, "lora_A"))
+    print(f"挂了 LoRA 的层 {n_lora} 个，切块系数 {factor}")
+    log = {"args": vars(args), "train_size": len(train), "kinds": kinds, "steps": [],
+           "base_model_type": getattr(model.config, "model_type", None),
+           "patch_factor": factor, "lora_layers": n_lora}
 
     def save(step: int, log: dict, t_start: float, skipped: int) -> None:
         """存一次权重，顺手把「这份权重练了多少步」写清楚。

@@ -139,10 +139,44 @@ def box_center(box) -> Tuple[float, float]:
 # --------------------------------------------------------------------------
 
 
-class LocalQwenVL:
-    """本地跑 Qwen2.5-VL。
+# 定位坐标的口径：模型回的坐标除以什么才是 0~1。
+#   pixel    缩放后图片上的像素值，Qwen2.5-VL 预训练就是这样
+#   rel1000  0~1000 的相对值
+# 口径由预训练定死，提示词改不动（第 3 周实测）。新模型先用探针量出来再登记；
+# 没登记的一律按 pixel 处理并提示。
+COORD_SPACE_BY_MODEL_TYPE = {"qwen2_5_vl": "pixel"}
+COORD_SPACES = ("pixel", "rel1000")
 
-    3B 在 12GB 显存上 bf16 直接装得下；7B 需要 load_in_4bit=True。
+
+def strip_thinking(text: str) -> str:
+    """去掉思考段。推理时已关掉思考模式，正常不会出现；出现了也不能挡住后面的 JSON。"""
+    if "</think>" in text:
+        text = text.rsplit("</think>", 1)[1]
+    return re.sub(r"<think>.*", "", text, flags=re.S).strip()
+
+
+def check_adapter_base(adapter: str, model_id: str) -> None:
+    """适配器只能挂回训练它的那个基座。挂错了不一定报错，结果却全是错的。"""
+    import json
+
+    cfg = os.path.join(adapter, "adapter_config.json")
+    if not os.path.isfile(cfg):
+        return
+    with open(cfg, encoding="utf-8") as f:
+        base = json.load(f).get("base_model_name_or_path") or ""
+    name = lambda x: x.replace("\\", "/").rstrip("/").split("/")[-1]
+    if base and name(base) != name(model_id):
+        raise ValueError(f"适配器 {adapter} 是在 {base} 上训的，不能挂到 {model_id} 上（加 --model {base}）")
+
+
+class LocalQwenVL:
+    """本地跑 Qwen 系列视觉语言模型：Qwen2.5-VL、Qwen3.5。
+
+    两代的差别都从模型自己的配置里读，不写死：
+      切块系数  Qwen2.5-VL 是 14×2=28，Qwen3.5 是 16×2=32
+      思考模式  Qwen3.5 的对话模板默认先思考再回答，这里一律关掉
+    图片上限用视觉 token 数给（max_tokens），像素 = token 数 × 系数²，
+    两个模型同一个数就是同一份 token 预算。
     """
 
     def __init__(
@@ -150,20 +184,34 @@ class LocalQwenVL:
         model_id: str = DEFAULT_MODEL,
         device: str = "cuda",
         load_in_4bit: bool = False,
-        min_pixels: int = 256 * 28 * 28,
-        max_pixels: int = 1280 * 28 * 28,
+        min_pixels: Optional[int] = None,
+        max_pixels: Optional[int] = None,
         adapter: Optional[str] = None,
         norm_coords: bool = False,
+        min_tokens: int = 256,
+        max_tokens: int = 1280,
+        coord_space: Optional[str] = None,
     ) -> None:
         import torch
-        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+        from transformers import AutoModelForImageTextToText, AutoProcessor
+
+        if adapter:
+            check_adapter_base(adapter, model_id)
+        if coord_space is not None and coord_space not in COORD_SPACES:
+            raise ValueError(f"没有 {coord_space!r} 这种坐标口径，可选 {COORD_SPACES}")
 
         self.norm_coords = norm_coords
         self.torch = torch
         self.model_id = model_id
-        self.min_pixels = min_pixels
-        self.max_pixels = max_pixels
         self.adapter = adapter
+
+        ip = AutoProcessor.from_pretrained(model_id).image_processor
+        self.factor = int(getattr(ip, "patch_size", 14) or 14) * int(getattr(ip, "merge_size", 2) or 2)
+        self.min_pixels = min_pixels if min_pixels is not None else min_tokens * self.factor ** 2
+        self.max_pixels = max_pixels if max_pixels is not None else max_tokens * self.factor ** 2
+        self.processor = AutoProcessor.from_pretrained(
+            model_id, min_pixels=self.min_pixels, max_pixels=self.max_pixels
+        )
 
         kwargs = {"dtype": torch.bfloat16, "device_map": device}
         if load_in_4bit:
@@ -176,24 +224,38 @@ class LocalQwenVL:
             )
             kwargs.pop("dtype")
 
-        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_id, **kwargs)
+        self.model = AutoModelForImageTextToText.from_pretrained(model_id, **kwargs)
+        if coord_space is None:
+            model_type = getattr(self.model.config, "model_type", "")
+            coord_space = COORD_SPACE_BY_MODEL_TYPE.get(model_type)
+            if coord_space is None:
+                print(f"注意：{model_type} 的定位坐标口径还没实测登记，暂按 pixel 处理")
+                coord_space = "pixel"
+        self.coord_space = coord_space
         if adapter:
             # 挂 LoRA 权重。微调前后必须用同一套评测脚本，差别只在有没有这一步。
             from peft import PeftModel
 
             self.model = PeftModel.from_pretrained(self.model, adapter)
         self.model.eval()
-        self.processor = AutoProcessor.from_pretrained(
-            model_id, min_pixels=min_pixels, max_pixels=max_pixels
-        )
 
     def resized_size(self, height: int, width: int) -> Tuple[int, int]:
-        """模型实际看到的尺寸。它输出的坐标就在这个尺寸的像素空间里。"""
+        """模型实际看到的尺寸 (高, 宽)。"""
         from qwen_vl_utils.vision_process import smart_resize
 
         return smart_resize(
-            height, width, factor=28, min_pixels=self.min_pixels, max_pixels=self.max_pixels
+            height, width, factor=getattr(self, "factor", 28),
+            min_pixels=self.min_pixels, max_pixels=self.max_pixels,
         )
+
+    def coord_size(self, height: int, width: int) -> Tuple[int, int]:
+        """模型回的坐标要除以的数 (高方向, 宽方向)，与 resized_size 同序。
+
+        pixel 口径就是缩放后的尺寸；rel1000 口径两边都是 1000。
+        """
+        if getattr(self, "coord_space", "pixel") == "rel1000":
+            return 1000, 1000
+        return self.resized_size(height, width)
 
     def ask(self, image: np.ndarray, prompt: str,
             max_new_tokens: int = MAX_NEW_TOKENS) -> str:
@@ -206,8 +268,10 @@ class LocalQwenVL:
                 "content": [{"type": "image", "image": pil}, {"type": "text", "text": prompt}],
             }
         ]
+        # 关掉思考模式：Qwen3.5 的模板默认先写一段思考，JSON 会被挤到后面甚至截断。
+        # Qwen2.5-VL 的模板不认这个参数，渲染出来的文本不变。
         text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
+            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
         )
         inputs = self.processor(text=[text], images=[pil], return_tensors="pt").to(
             self.model.device
@@ -215,14 +279,13 @@ class LocalQwenVL:
         with self.torch.inference_mode():
             out = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
         trimmed = out[:, inputs.input_ids.shape[1]:]
-        return self.processor.batch_decode(trimmed, skip_special_tokens=True)[0].strip()
+        return strip_thinking(self.processor.batch_decode(trimmed, skip_special_tokens=True)[0])
 
     def locate(self, image: np.ndarray, instruction: str) -> Optional[Tuple[float, float]]:
         """给一句话，返回归一化的点击点，找不到返回 None。
 
-        norm_coords=True 时直接问 0~1 的比例值，不经过像素换算。像素那条路要拿
-        预测框除以 smart_resize 后的尺寸，训练和推理的 max_pixels 一旦不同就整体
-        偏掉；比例值与分辨率无关，OS-Atlas 和 SeeClick 用的都是这套。
+        norm_coords=True 时直接问 0~1 的比例值，不经过换算。否则问框，框中心除以
+        coord_size：pixel 口径是缩放后的尺寸，rel1000 口径是 1000。
         """
         if getattr(self, "norm_coords", False):
             raw = self.ask(image, GROUNDING_PROMPT_NORM.format(instruction=instruction))
@@ -232,7 +295,7 @@ class LocalQwenVL:
         if box is None:
             return None
         h, w = image.shape[:2]
-        rh, rw = self.resized_size(h, w)
+        rh, rw = self.coord_size(h, w)
         cx, cy = box_center(box)
         return min(max(cx / rw, 0.0), 1.0), min(max(cy / rh, 0.0), 1.0)
 

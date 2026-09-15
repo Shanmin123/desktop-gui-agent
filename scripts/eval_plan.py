@@ -61,7 +61,7 @@ def main() -> None:
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--adapter", default=None, help="挂上 LoRA 权重评测微调后的模型")
     ap.add_argument("--max-pixels", type=int, default=1280,
-                    help="图片上限，单位 28x28 的块。微调时降过这个值的话，"
+                    help="图片上限，单位是视觉 token 数（Qwen2.5-VL 一个 token 是 28×28 像素，Qwen3.5 是 32×32）。微调时降过这个值的话，"
                          "用同一个值评测才能看出权重本身的效果")
     ap.add_argument("--split", default="val", choices=["train", "val"])
     ap.add_argument("--limit", type=int, default=None)
@@ -78,8 +78,7 @@ def main() -> None:
 
     print(f"加载模型 {args.model} ……")
     t0 = time.perf_counter()
-    vlm = LocalQwenVL(args.model, adapter=args.adapter,
-                      max_pixels=args.max_pixels * 28 * 28)
+    vlm = LocalQwenVL(args.model, adapter=args.adapter, max_tokens=args.max_pixels)
     print(f"  耗时 {time.perf_counter() - t0:.1f}s")
 
     rows, covs, extras, empty = [], [], [], 0

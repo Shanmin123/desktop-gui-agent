@@ -52,12 +52,15 @@ def main() -> None:
     ap.add_argument("--save-fail", type=int, default=0, help="另存前 N 个失败样本用于排查")
     ap.add_argument("--tag", default="base", help="结果文件名后缀，用于区分微调前后")
     ap.add_argument("--adapter", default=None, help="挂上 LoRA 权重评测微调后的模型")
+    ap.add_argument("--coord-space", default=None, choices=["pixel", "rel1000"],
+                    help="模型回的定位坐标是什么口径。不给就按模型登记的口径")
     ap.add_argument("--norm-coords", action="store_true",
                     help="用归一化坐标那套提示词评测。微调时用了 --norm-coords 的，"
                          "评测也要加，否则口径对不上")
     ap.add_argument("--max-pixels", type=int, default=1280,
-                    help="图片上限，单位 28x28 的块。定位的坐标空间由它决定——"
-                         "微调时用了哪个值，评测就必须用同一个，否则 locate 除错尺寸")
+                    help="图片上限，单位是视觉 token 数（Qwen2.5-VL 一个 token 是 28×28 像素，"
+                         "Qwen3.5 是 32×32）。pixel 口径下坐标空间由它决定，"
+                         "微调时用了哪个值，评测就必须用同一个")
     args = ap.parse_args()
 
     from datasets import load_dataset
@@ -70,8 +73,8 @@ def main() -> None:
     print(f"加载模型 {args.model} ……")
     t0 = time.perf_counter()
     vlm = LocalQwenVL(args.model, load_in_4bit=args.load_in_4bit, adapter=args.adapter,
-                      max_pixels=args.max_pixels * 28 * 28,
-                      norm_coords=args.norm_coords)
+                      max_tokens=args.max_pixels, norm_coords=args.norm_coords,
+                      coord_space=args.coord_space)
     print(f"  耗时 {time.perf_counter() - t0:.1f}s")
 
     import torch
@@ -124,6 +127,7 @@ def main() -> None:
                 "adapter": args.adapter,
                 "max_pixels": args.max_pixels,
                 "norm_coords": args.norm_coords,
+                "coord_space": vlm.coord_space,
                 "n": len(recs),
                 "accuracy": {k: {"hit": v[0], "total": v[1]} for k, v in stats.items()},
                 "avg_latency_s": sum(latencies) / len(latencies),

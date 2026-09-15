@@ -463,3 +463,46 @@ def test_locate_uses_the_norm_path_when_enabled():
     assert Fake(True).locate(img, "保存") == (0.25, 0.75)
     # 像素那条路要除以尺寸：框中心 (20, 30) / (200, 100)
     assert Fake(False).locate(img, "保存") == pytest.approx((0.1, 0.3))
+
+
+# --- 迁移到 Qwen3.5 之后加的 ------------------------------------------------
+
+
+def test_resized_size_follows_the_patch_factor():
+    """Qwen3.5 的切块系数是 32：1280x720 在 640 个 token 下送进去是 1056x576。"""
+    m = _stub(LocalQwenVL, "", factor=32, min_pixels=256 * 32 * 32, max_pixels=640 * 32 * 32)
+    assert m.resized_size(720, 1280) == (576, 1056)
+
+
+def test_coord_size_uses_1000_for_relative_coordinates():
+    m = _stub(LocalQwenVL, '{"bbox_2d": [0, 0, 1000, 1000]}', coord_space="rel1000",
+              factor=32, min_pixels=256 * 32 * 32, max_pixels=640 * 32 * 32)
+    assert m.coord_size(720, 1280) == (1000, 1000)
+    assert m.locate(np.zeros((720, 1280, 3), dtype=np.uint8), "整块屏幕") == pytest.approx((0.5, 0.5))
+
+
+def test_coord_size_defaults_to_resized_pixels():
+    m = _stub(LocalQwenVL, "", min_pixels=MIN_PIXELS, max_pixels=MAX_PIXELS)
+    assert m.coord_size(1080, 1920) == _smart_resize(1080, 1920)
+
+
+def test_strip_thinking_keeps_only_the_answer():
+    from gui_agent.models import strip_thinking
+
+    assert strip_thinking('<think>先想想</think>\n{"a": 1}') == '{"a": 1}'
+    assert strip_thinking('想了一堆</think>{"a": 1}') == '{"a": 1}'
+    assert strip_thinking('{"a": 1}') == '{"a": 1}'
+    assert strip_thinking("<think>一直没想完") == ""
+
+
+def test_adapter_cannot_be_mounted_on_another_base(tmp_path):
+    import json as _json
+
+    from gui_agent.models import check_adapter_base
+
+    (tmp_path / "adapter_config.json").write_text(
+        _json.dumps({"base_model_name_or_path": "Qwen/Qwen2.5-VL-3B-Instruct"}), encoding="utf-8")
+    check_adapter_base(str(tmp_path), "Qwen/Qwen2.5-VL-3B-Instruct")
+    check_adapter_base(str(tmp_path), r"D:\models\Qwen2.5-VL-3B-Instruct")   # 本地路径，同名
+    with pytest.raises(ValueError, match="Qwen3.5-4B"):
+        check_adapter_base(str(tmp_path), "Qwen/Qwen3.5-4B")

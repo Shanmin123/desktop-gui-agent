@@ -17,3 +17,8 @@ logs/*
 *.png
 *.jpg
 *.mp4
+
+# 规划文件，不入库
+task_plan.md
+findings.md
+progress.md

@@ -78,8 +78,10 @@ def main() -> None:
     ap.add_argument("--tag", default="base")
     ap.add_argument("--adapter", default=None, help="挂上 LoRA 权重评测微调后的模型")
     ap.add_argument("--max-pixels", type=int, default=1280,
-                    help="图片上限，单位 28x28 的块。微调时降过这个值的话，"
+                    help="图片上限，单位是视觉 token 数（Qwen2.5-VL 一个 token 是 28×28 像素，Qwen3.5 是 32×32）。微调时降过这个值的话，"
                          "用同一个值评测才能看出权重本身的效果")
+    ap.add_argument("--coord-space", default=None, choices=["pixel", "rel1000"],
+                    help="模型回的定位坐标是什么口径。不给就按模型登记的口径")
     ap.add_argument("--no-ocr", action="store_true",
                     help="不跑 OCR，提示词里不带元素清单。默认带，与实际循环一致")
     ap.add_argument("--max-new-tokens", type=int, default=128,
@@ -103,8 +105,8 @@ def main() -> None:
 
     print(f"加载模型 {args.model} ……")
     t0 = time.perf_counter()
-    vlm = LocalQwenVL(args.model, adapter=args.adapter,
-                      max_pixels=args.max_pixels * 28 * 28)
+    vlm = LocalQwenVL(args.model, adapter=args.adapter, max_tokens=args.max_pixels,
+                      coord_space=args.coord_space)
     print(f"  耗时 {time.perf_counter() - t0:.1f}s")
 
     # 两段式的提示词里本来就没有元素清单，agent.py 在这条路径上也不跑 OCR，
@@ -136,7 +138,7 @@ def main() -> None:
                                            state if args.target_elements else None,
                                            TARGET_ELEMENTS_LIMIT)
                       if args.locate_target else render_prompt(instruction, state, []))
-            rh, rw = vlm.resized_size(*model_img.shape[:2])
+            rh, rw = vlm.coord_size(*model_img.shape[:2])
 
             t = time.perf_counter()
             raw = vlm.ask(model_img, prompt, max_new_tokens=args.max_new_tokens)
@@ -209,6 +211,7 @@ def main() -> None:
         "model": args.model,
         "adapter": args.adapter,
         "max_pixels": args.max_pixels,
+        "coord_space": vlm.coord_space,
         "n": n,
         "with_ocr": perception is not None,
         "locate_target": args.locate_target,

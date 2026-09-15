@@ -110,7 +110,7 @@ def main() -> None:
 
             prompt = render_prompt(r["instruction_zh"] or r["instruction"], state, [],
                                    variant=variant)
-            rh, rw = vlm.resized_size(*model_img.shape[:2])
+            rh, rw = vlm.coord_size(*model_img.shape[:2])
 
             t = time.perf_counter()
             raw = vlm.ask(model_img, prompt)

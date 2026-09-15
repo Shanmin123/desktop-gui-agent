@@ -569,6 +569,19 @@ class FakeVLMWithSize(FakeVLM):
         return (804, 1430)  # (rh, rw)
 
 
+class FakeVLMWithCoordSize(FakeVLMWithSize):
+    def coord_size(self, h, w):
+        return (1000, 1000)  # rel1000 口径
+
+
+def test_agent_prefers_coord_size_over_resized_size(screen):
+    vlm = FakeVLMWithCoordSize(['{"action": {"type": "click", "point": [500, 250]}}',
+                                '{"action": {"type": "finished"}}'])
+    t = Agent(FakePerception(screen), Controller(backend=RecordingBackend()), vlm).run("x")
+    assert t.steps[0].ok
+    assert t.steps[0].action.point == pytest.approx((0.5, 0.25), abs=0.01)
+
+
 def test_agent_passes_model_size(screen):
     vlm = FakeVLMWithSize(['{"action": {"type": "click", "point": [715, 402]}}',
                            '{"action": {"type": "finished"}}'])

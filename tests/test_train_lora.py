@@ -43,8 +43,10 @@ class FakeProcessor:
 
     def __init__(self):
         self.calls = []
+        self.template_kwargs = []
 
-    def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=True):
+    def apply_chat_template(self, msgs, tokenize=False, add_generation_prompt=True, **kw):
+        self.template_kwargs.append(kw)
         text = msgs[0]["content"][1]["text"]
         return f"<|im_start|>user\n{text}<|im_end|>\n<|im_start|>assistant\n"
 
@@ -242,3 +244,76 @@ def test_optimizer_knobs_have_the_old_defaults():
     a = _parser_args([])
     assert a.weight_decay == 0.01 and a.adam_beta2 == 0.999
     assert a.scheduler == "onecycle" and a.warmup_ratio == 0.05
+
+
+# --- 迁移到 Qwen3.5 之后加的 ------------------------------------------------
+
+
+def test_encode_turns_thinking_off(row):
+    """训练和推理都要关思考模式，否则 Qwen3.5 的提示词两边长得不一样。"""
+    proc = FakeProcessor()
+    encode(proc, row, max_len=10_000)
+    assert proc.template_kwargs and all(kw.get("enable_thinking") is False for kw in proc.template_kwargs)
+
+
+QWEN25_NAMES = [
+    "model.visual.blocks.0.attn.qkv", "model.visual.blocks.0.attn.proj",
+    "model.visual.blocks.0.mlp.gate_proj", "model.visual.blocks.0.mlp.up_proj",
+    "model.language_model.layers.0.self_attn.q_proj", "model.language_model.layers.0.self_attn.k_proj",
+    "model.language_model.layers.0.self_attn.v_proj", "model.language_model.layers.0.self_attn.o_proj",
+    "model.language_model.layers.0.mlp.gate_proj", "model.language_model.layers.0.mlp.up_proj",
+    "model.language_model.layers.0.mlp.down_proj", "lm_head",
+]
+QWEN35_NAMES = [
+    "model.visual.blocks.0.attn.qkv", "model.visual.blocks.0.attn.proj",
+    "model.visual.blocks.0.mlp.linear_fc1", "model.visual.blocks.0.mlp.linear_fc2",
+    "model.language_model.layers.0.linear_attn.in_proj_qkv", "model.language_model.layers.0.linear_attn.in_proj_z",
+    "model.language_model.layers.0.linear_attn.in_proj_a", "model.language_model.layers.0.linear_attn.in_proj_b",
+    "model.language_model.layers.0.linear_attn.out_proj",
+    "model.language_model.layers.3.self_attn.q_proj", "model.language_model.layers.3.self_attn.o_proj",
+    "model.language_model.layers.3.mlp.gate_proj", "lm_head",
+]
+
+
+def _matched(regex, names):
+    import re as _re
+
+    return {n for n in names if _re.fullmatch(regex, n)}
+
+
+def test_lora_attn_targets_on_qwen25_are_exactly_qkvo():
+    """Qwen2.5 上只挂注意力的结果要和迁移前的 q/k/v/o 列表完全一样，老结果才可复现。"""
+    got = _matched(train_lora.lora_target_regex(QWEN25_NAMES, "attn"), QWEN25_NAMES)
+    assert got == {n for n in QWEN25_NAMES if n.rsplit(".", 1)[-1] in ("q_proj", "k_proj", "v_proj", "o_proj")}
+
+
+def test_lora_attn_targets_on_qwen35_include_linear_attention():
+    got = _matched(train_lora.lora_target_regex(QWEN35_NAMES, "attn"), QWEN35_NAMES)
+    suffixes = {n.rsplit(".", 1)[-1] for n in got}
+    assert {"in_proj_qkv", "in_proj_z", "out_proj", "q_proj", "o_proj"} <= suffixes
+    assert not any("visual" in n for n in got) and "lm_head" not in got
+    assert not any(n.endswith("gate_proj") for n in got)
+
+
+def test_lora_all_targets_never_touch_the_vision_tower():
+    """Qwen2.5-VL 视觉塔的 MLP 也叫 gate/up_proj，按名字列表会被一起挂上。"""
+    got = _matched(train_lora.lora_target_regex(QWEN25_NAMES, "all"), QWEN25_NAMES)
+    assert "model.language_model.layers.0.mlp.gate_proj" in got
+    assert not any("visual" in n for n in got)
+
+
+def test_lora_targets_fail_loudly_when_nothing_matches():
+    with pytest.raises(ValueError):
+        train_lora.lora_target_regex(["model.visual.blocks.0.attn.qkv"], "attn")
+
+
+def test_est_tokens_counts_image_by_patch_factor(tmp_path):
+    from PIL import Image
+
+    p = tmp_path / "x.png"
+    Image.new("RGB", (320, 320)).save(p)
+    row = {"image": str(p), "prompt": "", "response": ""}
+    tok = lambda s: {"input_ids": []}
+    assert train_lora.est_tokens(row, tok, 10_000, factor=32) == 100
+    assert train_lora.est_tokens(row, tok, 10_000, factor=28) == (320 * 320) // (28 * 28)
+    assert train_lora.est_tokens(row, tok, 50, factor=32) == 50

@@ -288,11 +288,16 @@ class Agent:
         return self._chain
 
     def _model_size(self, image):
-        """模型实际看到的尺寸，用来把它回的像素坐标换算成归一化坐标。"""
-        if not hasattr(self.vlm, "resized_size"):
+        """模型回的坐标除以什么得到 0~1，返回 (宽, 高)。
+
+        优先用 coord_size（按模型的坐标口径给出）；没有就退回 resized_size，
+        即按缩放后的像素算。两样都没有就不换算。
+        """
+        size_of = getattr(self.vlm, "coord_size", None) or getattr(self.vlm, "resized_size", None)
+        if size_of is None:
             return None
         h, w = image.shape[:2]
-        rh, rw = self.vlm.resized_size(h, w)
+        rh, rw = size_of(h, w)
         return rw, rh
 
     def _shot_path(self, traj: Trajectory) -> Optional[str]:
