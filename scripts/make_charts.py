@@ -5,8 +5,11 @@
   screenspot_by_category.png   ScreenSpot 桌面 334 条，按平台和元素类型分组的定位准确率
   screenspot_vs_tokens.png     视觉 token 预算和定位准确率的关系
   screenagent_metrics.png      ScreenAgent test 353 条：动作类型准确率、类型对且点准、键盘召回
+  prompt_variants.png          两段式提示词变体（tune_prompt.py --mode two_stage）
   training_loss.png            两个基座上交付配方的训练 loss
   suite_by_level.png           25 个任务评测集按难度档的成功率（跑过 live 才有）
+
+按应用拆分的图由 scripts/analyze_by_app.py 画（screenagent_by_app.png）。
 
 用法：
     python scripts/make_charts.py
@@ -31,7 +34,8 @@ SCREENSPOT = [
 TOKEN_CURVES = {
     "Qwen3.5-4B 基座": [(320, "grounding_q35_base_320.json"), (640, "grounding_q35_base_640.json"),
                        (1280, "grounding_q35_base.json"), (1920, "grounding_q35_base_1920.json")],
-    "Qwen2.5-VL-3B 基座": [(640, "grounding_base_640.json"), (1280, "grounding_base.json")],
+    "Qwen2.5-VL-3B 基座": [(320, "grounding_base_320.json"), (640, "grounding_base_640.json"),
+                          (1280, "grounding_base.json"), (1920, "grounding_base_1920.json")],
 }
 SCREENAGENT = [
     ("Qwen2.5 基座 一段式", ["screenagent_base_cases.json"]),
@@ -41,6 +45,7 @@ SCREENAGENT = [
     ("Qwen3.5 基座 两段式", ["screenagent_q35_base_2s.json"]),
     ("Qwen3.5 微调 两段式", ["screenagent_q35_2sp_2s.json"]),
 ]
+PROMPTS = [("Qwen3.5-4B 基座", "prompt_q35_2s.json"), ("Qwen2.5-VL-3B 基座", "prompt_q25_2s.json")]
 TRAINING = [("Qwen2.5-VL-3B", "train_lora_2sp.json"), ("Qwen3.5-4B", "train_q35_2sp.json")]
 
 
@@ -157,6 +162,23 @@ def chart_screenagent(plt) -> bool:
     return True
 
 
+def chart_prompts(plt) -> bool:
+    """每个模型画两组柱：动作类型准确率、类型对且点准。老的一段式日志没有后者，那组柱留空。"""
+    logs = [(label, load(name)) for label, name in PROMPTS]
+    logs = [(label, d) for label, d in logs if d and d.get("results")]
+    if not logs:
+        return False
+    variants = list(dict.fromkeys(v for _, d in logs for v in d["results"]))
+    series = []
+    for label, d in logs:
+        res = d["results"]
+        series.append((f"{label} 类型准确", [res.get(v, {}).get("type_accuracy") for v in variants]))
+        series.append((f"{label} 类型对且点准", [res.get(v, {}).get("joint_accuracy") for v in variants]))
+    _bars(plt, variants, series, f"两段式提示词变体（ScreenAgent test 前 {logs[0][1].get('n')} 条）", "比例",
+          OUT / "prompt_variants.png")
+    return True
+
+
 def chart_training(plt) -> bool:
     fig, ax = plt.subplots(figsize=(6, 4))
     drawn = False
@@ -206,8 +228,8 @@ def main() -> None:
         raise SystemExit("没有 matplotlib：pip install matplotlib")
     OUT.mkdir(parents=True, exist_ok=True)
     for name, fn in [("screenspot_by_category", chart_screenspot), ("screenspot_vs_tokens", chart_tokens),
-                     ("screenagent_metrics", chart_screenagent), ("training_loss", chart_training),
-                     ("suite_by_level", chart_suite)]:
+                     ("screenagent_metrics", chart_screenagent), ("prompt_variants", chart_prompts),
+                     ("training_loss", chart_training), ("suite_by_level", chart_suite)]:
         print(f"{name:<24} {'已生成' if fn(plt) else '缺日志，跳过'}")
     print(f"图在 {OUT}")
 

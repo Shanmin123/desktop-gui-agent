@@ -4,6 +4,13 @@
 session，按任务描述里的关键词归成 7 类应用；每类里算动作类型准确率和「类型对且点准」
 （坐标类动作要求预测点与真值点的归一化距离 ≤ 0.10）。
 
+另给每个配置算整体指标，是第 7 周第 2 项的成功率、执行时间、错误率在离线评测上的口径：
+  离线任务成功率  一个 session 里每一步都「类型对且点准」才算这条任务做对。评测时每一步喂的是
+                真实截图、提示词里不带历史，所以是「每一步单独拿出来都做对」的严格口径，和 live
+                里连着做完不是一回事（前一步错了，后面的屏幕就对不上）
+  单步耗时        评测日志里每步的平均推理时间
+  无法执行率      输出解析不了，或两段式里定位不到控件，这一步拿不出可执行的动作
+
 输出 logs/screenagent_by_app.json 和 docs/figures/screenagent_by_app.png。
 
 用法：
@@ -37,11 +44,14 @@ APPS = [DEFAULT_APP] + [name for name, _ in RULES]
 
 CONFIGS = [
     ("Qwen2.5 基座 一段式", ["screenagent_base_cases.json"]),
+    ("Qwen2.5 基座 两段式", ["screenagent_base_2s_256.json"]),
     ("Qwen2.5 微调 两段式", ["screenagent_lora2sp_2s_fix.json", "screenagent_lora2sp_2s.json"]),
     ("Qwen3.5 基座 一段式", ["screenagent_q35_base_cases.json"]),
     ("Qwen3.5 基座 两段式", ["screenagent_q35_base_2s.json"]),
     ("Qwen3.5 微调 两段式", ["screenagent_q35_2sp_2s.json"]),
 ]
+
+PARSE_FAILED = "解析失败"  # eval_screenagent.py 在逐条记录里给拿不出动作的步写的预测类型
 
 
 def app_of(instruction: str) -> str:
@@ -52,10 +62,23 @@ def app_of(instruction: str) -> str:
     return DEFAULT_APP
 
 
+def _test_steps() -> List[dict]:
+    with TEST.open(encoding="utf-8") as f:
+        return [json.loads(line) for line in f]
+
+
 def apps_of_test_steps() -> List[str]:
     """test.jsonl 第 i 行属于哪类应用；评测日志里的 cases[*]["i"] 就是这个行号。"""
-    with TEST.open(encoding="utf-8") as f:
-        return [app_of(json.loads(line).get("instruction", "")) for line in f]
+    return [app_of(r.get("instruction", "")) for r in _test_steps()]
+
+
+def sessions_of_test_steps() -> List[str]:
+    """test.jsonl 第 i 行属于哪个 session（一条完整任务）。"""
+    return [r["session_id"] for r in _test_steps()]
+
+
+def _joint_ok(c: dict) -> bool:
+    return c["gt"] == c["pred"] and (c.get("dist") is None or c["dist"] <= 0.10)
 
 
 def by_app(cases: list, apps: List[str]) -> Dict[str, Dict[str, float]]:
@@ -63,11 +86,28 @@ def by_app(cases: list, apps: List[str]) -> Dict[str, Dict[str, float]]:
     for c in cases:
         s = stats.setdefault(apps[c["i"]], [0, 0, 0])
         s[0] += 1
-        ok = c["gt"] == c["pred"]
-        s[1] += ok
-        s[2] += ok and (c.get("dist") is None or c["dist"] <= 0.10)
+        s[1] += c["gt"] == c["pred"]
+        s[2] += _joint_ok(c)
     return {app: {"n": n, "type_accuracy": t / n, "joint_accuracy": j / n}
             for app, (n, t, j) in stats.items()}
+
+
+def overall(cases: list, sessions: List[str]) -> Dict[str, float]:
+    """步级的类型准确率、类型对且点准、无法执行率，加上按 session 算的离线任务成功率。"""
+    n = len(cases)
+    done: Dict[str, bool] = {}
+    for c in cases:
+        sid = sessions[c["i"]]
+        done[sid] = done.get(sid, True) and _joint_ok(c)
+    return {
+        "n": n,
+        "type_accuracy": sum(c["gt"] == c["pred"] for c in cases) / n,
+        "joint_accuracy": sum(_joint_ok(c) for c in cases) / n,
+        "unexecutable_rate": sum(c["pred"] == PARSE_FAILED for c in cases) / n,
+        "sessions": len(done),
+        "sessions_done": sum(done.values()),
+        "session_success": sum(done.values()) / len(done),
+    }
 
 
 def _load(names: List[str]):
@@ -83,18 +123,29 @@ def _load(names: List[str]):
 
 def main() -> None:
     apps = apps_of_test_steps()
+    sessions = sessions_of_test_steps()
     counts = {a: apps.count(a) for a in APPS}
     results = {}
     for label, names in CONFIGS:
         name, d = _load(names)
         if d:
-            results[label] = {"log": name, "by_app": by_app(d["cases"], apps)}
+            results[label] = {"log": name,
+                              "overall": {**overall(d["cases"], sessions), "sec_per_step": d.get("avg_latency_s")},
+                              "by_app": by_app(d["cases"], apps)}
 
     if not results:
         raise SystemExit("没有带逐条记录的 ScreenAgent 评测日志")
 
     labels = list(results)
-    print("| 应用 | 步数 | " + " | ".join(labels) + " |")
+    print("| 配置 | 动作类型准确 | 类型对且点准 | 无法执行 | 离线任务成功（session 每步都对） | 单步耗时 |")
+    print("|---|---|---|---|---|---|")
+    for label in labels:
+        o = results[label]["overall"]
+        sec = f"{o['sec_per_step']:.2f} s" if o.get("sec_per_step") else "—"
+        print(f"| {label} | {o['type_accuracy']:.1%} | {o['joint_accuracy']:.1%} | {o['unexecutable_rate']:.1%} "
+              f"| {o['sessions_done']}/{o['sessions']} = {o['session_success']:.1%} | {sec} |")
+
+    print("\n| 应用 | 步数 | " + " | ".join(labels) + " |")
     print("|---|---|" + "---|" * len(labels))
     for app in APPS:
         cells = []
