@@ -300,12 +300,16 @@ def parse_with_target(text: str, vlm, image, state: ScreenState,
                       model_size=None) -> Tuple[str, Action]:
     """解析两段式的输出，把 target 描述换成坐标。"""
     from .agent import _extract_json, parse_step
+    from .schema import ACTION_ALIAS
 
     data = _extract_json(text)
     raw = data.get("action") if isinstance(data, dict) else None
     target = raw.get("target") if isinstance(raw, dict) else None
 
+    # 先按别名归一再判断要不要定位：Qwen2.5 基座写的是 left_click，不归一的话带着 target
+    # 也会走进下面「不需要位置」的分支、报缺 point（09-16 重跑基座两段式，353 条里 111 条这样错）
     kind = str(raw.get("type", "click")) if isinstance(raw, dict) else "click"
+    kind = ACTION_ALIAS.get(kind, kind)
     if (kind in ("type", "hotkey") and isinstance(target, str) and target.strip()
             and not str(raw.get("text") or "").strip()):
         # 键盘动作把内容写进了 target：lora_2sp 离线 353 条里缺 text 的 6 条全是这样

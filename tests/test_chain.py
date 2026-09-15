@@ -441,3 +441,28 @@ def test_unknown_target_variant_is_rejected():
 
     with _pytest.raises(ValueError):
         render_target_prompt("x", [], variant="nope")
+
+
+# --- 两段式解析：动作类型的别名 ------------------------------------------------
+
+
+def test_aliased_click_with_target_is_still_located(screen):
+    """Qwen2.5 基座写的是 left_click。别名要先归一再判断要不要定位，否则带着 target 也会报缺 point。
+
+    09-16 查出：Qwen2.5 基座两段式重跑 353 条，111 条这样被判成解析失败。
+    """
+    from gui_agent.chain import parse_with_target
+
+    vlm = LocatingVLM("", point=(0.4, 0.6))
+    _, act = parse_with_target('{"action": {"type": "left_click", "target": "搜索框"}}', vlm, None, screen)
+    assert act.type == "click" and act.point == (0.4, 0.6)
+    assert len(vlm.located) == 1
+
+
+def test_aliased_keyboard_action_with_content_in_target_is_used_as_text(screen):
+    from gui_agent.chain import parse_with_target
+
+    vlm = LocatingVLM("", point=(0.5, 0.5))
+    _, act = parse_with_target('{"action": {"type": "input", "target": "你好"}}', vlm, None, screen)
+    assert act.type == "type" and act.text == "你好" and act.point is None
+    assert vlm.located == []
