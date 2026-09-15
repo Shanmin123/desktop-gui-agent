@@ -78,9 +78,12 @@ def convert(sources, out_pdf: Path, browsers: list) -> None:
             "\n\n".join(Path(f).read_text(encoding="utf-8").strip() for f in sources),
             encoding="utf-8",
         )
+        # 源文件拷到了临时目录，文档里 figures/xxx.png 这类相对路径要按原文件所在目录找，
+        # 否则图片嵌不进去
+        resource_dirs = ";".join(dict.fromkeys(str(Path(f).resolve().parent) for f in sources))
         subprocess.run(
             ["pandoc", str(src), "-f", "gfm", "-t", "html5", "-s",
-             "--metadata", "title=", "-c", str(css),
+             "--metadata", "title=", "-c", str(css), "--resource-path", resource_dirs,
              "--embed-resources", "--standalone", "-o", str(html)],
             check=True, capture_output=True,
         )
