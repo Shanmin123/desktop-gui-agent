@@ -118,6 +118,22 @@ def encode(processor, row: dict, max_len: int):
     return full
 
 
+def answer_only(batch) -> dict:
+    """只在回答那段算 logits，loss 与整段计算相同。
+
+    labels 前面是屏蔽掉的提示词，那些位置的 logits 不进 loss。Qwen3.5 词表 24.8 万，
+    一条 1000 token 的样本整段算 logits 要 1 GB，loss 里升到 float32、再加上梯度又是两份；
+    回答只有几十到一百多 token。位置 p 的 logits 预测第 p+1 个 token，所以从第一个回答
+    token 的前一位开始留，labels 截掉同样长的前缀，loss 内部的错位对齐不变。
+    """
+    labels = batch["labels"]
+    valid = (labels[0] != IGNORE).nonzero()
+    if len(valid) == 0:
+        return dict(batch)
+    keep = labels.shape[1] - int(valid[0]) + 1
+    return {**batch, "labels": labels[:, -keep:], "logits_to_keep": keep}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct")
@@ -263,7 +279,7 @@ def main() -> None:
                 b = encode(processor, r, args.max_len)
                 if b is None:
                     continue
-                losses.append(model(**b.to("cuda")).loss.item())
+                losses.append(model(**answer_only(b.to("cuda"))).loss.item())
         model.train()
         return sum(losses) / len(losses) if losses else float("nan")
 
@@ -301,7 +317,7 @@ def main() -> None:
             if b is None:
                 skipped += 1
                 continue
-            loss = model(**b.to("cuda")).loss / args.accum
+            loss = model(**answer_only(b.to("cuda"))).loss / args.accum
             loss.backward()
             running.append(loss.item() * args.accum)
             seen += 1

@@ -329,3 +329,29 @@ def test_lora_qkvo_equals_attn_on_qwen25():
     """Qwen2.5 没有线性注意力，两种写法挂到的层一样。"""
     assert (_matched(train_lora.lora_target_regex(QWEN25_NAMES, "qkvo"), QWEN25_NAMES)
             == _matched(train_lora.lora_target_regex(QWEN25_NAMES, "attn"), QWEN25_NAMES))
+
+
+def test_answer_only_loss_matches_full_sequence():
+    """只留回答段的 logits 算出来的 loss，要和整段算的一样。"""
+    import torch
+    from transformers.loss.loss_utils import ForCausalLMLoss
+
+    torch.manual_seed(0)
+    L, V, head = 12, 50, 7
+    logits = torch.randn(1, L, V)
+    labels = torch.randint(0, V, (1, L))
+    labels[:, :head] = train_lora.IGNORE
+    b = train_lora.answer_only({"input_ids": torch.zeros(1, L, dtype=torch.long), "labels": labels})
+    k = b["logits_to_keep"]
+    assert k == L - head + 1 and b["labels"].shape[1] == k
+    assert torch.allclose(ForCausalLMLoss(logits, labels, V),
+                          ForCausalLMLoss(logits[:, -k:], b["labels"], V))
+
+
+def test_answer_only_leaves_the_inputs_whole():
+    import torch
+
+    ids = torch.arange(5).unsqueeze(0)
+    labels = torch.tensor([[train_lora.IGNORE] * 3 + [3, 4]])
+    b = train_lora.answer_only({"input_ids": ids, "labels": labels})
+    assert torch.equal(b["input_ids"], ids) and b["logits_to_keep"] == 3
