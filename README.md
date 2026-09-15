@@ -92,8 +92,9 @@ python scripts/run_tasks.py --live --adapter checkpoints/lora_2sp --locate-targe
 ```
 
 `lora_2sp` 训的是动作决策和任务拆解，定位（`vlm.locate`）这一段没训过，走基座自带的
-像素 `bbox_2d`，ScreenSpot 上和基座同档（69.8%~71.9%，基座 71.6%）。训练与评测的完整对照见
-`docs/第3周实验报告.md`。
+像素 `bbox_2d`：ScreenSpot 上 68.3%，基座 71.6%——图标那一类掉得多一些（47.9% 对 55.7%），
+因为训练里的控件名全取自 OCR 文字。动作选对换定位差一点，按端到端的用法划算，
+但不是没有代价。训练与评测的完整对照见 `docs/第3周实验报告.md`。
 
 默认 dry-run。`--live` 会真实操作桌面，开始前有倒计时，鼠标甩到屏幕左上角可强制中断。
 
