@@ -81,7 +81,8 @@ def _history(steps) -> list:
     """把 (动作, 内容) 列表变成 Step，渲染进提示词的「已执行」。"""
     out = []
     for kind, text in steps:
-        act = Action(type=kind, target=text) if kind == "click" else Action(type=kind, text=text)
+        act = (Action(type=kind, point=(0.42, 0.37)) if kind in ("click", "left_double", "right_single")
+               else Action(type=kind, text=text))
         out.append(Step(ScreenState(width=0, height=0), act, ok=True, changed=True))
     return out
 

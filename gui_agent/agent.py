@@ -78,6 +78,19 @@ def format_elements(state: ScreenState, limit: int = MAX_ELEMENTS,
     return "\n".join(lines) if lines else "  （没有识别到文字元素）"
 
 
+def describe_action(action: Action) -> str:
+    """历史里这一步怎么写：点击写坐标、键盘写内容，其余只写类型。
+
+    只写动作类型的话，模型看不出上一步点的是哪儿，界面没反应时就原样再点一次——真机跑
+    25 个任务时，274 步里 208 步执行后屏幕没有变化，5 步是连续重复同一个动作被判卡住。
+    """
+    if action.point is not None:
+        return f"{action.type} ({action.point[0]:.2f}, {action.point[1]:.2f})"
+    if action.text:
+        return f"{action.type} {action.text!r}"
+    return action.type
+
+
 def format_history(steps: List[Step], limit: int = 5) -> str:
     """最近几步做了什么、结果如何。太长会挤占上下文，只留末尾几步。"""
     if not steps:
@@ -91,7 +104,7 @@ def format_history(steps: List[Step], limit: int = 5) -> str:
             status = "执行了，但界面没有变化，很可能没点中"
         else:
             status = "成功"
-        out.append(f"  第{i}步 {s.action.type} → {status}")
+        out.append(f"  第{i}步 {describe_action(s.action)} → {status}")
     return "\n".join(out)
 
 

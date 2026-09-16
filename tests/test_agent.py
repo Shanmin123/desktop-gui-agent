@@ -188,7 +188,9 @@ def test_history_shows_recent_steps(screen):
     steps = [Step(screen, Action("click", point=(0.1, 0.1))),
              Step(screen, Action("type", text="x"), ok=False, error="窗口没焦点")]
     h = format_history(steps)
-    assert "第1步 click → 成功" in h and "窗口没焦点" in h
+    # 历史要写清楚点的是哪儿：只写类型的话，界面没反应时模型会原样再点一次
+    assert "第1步 click (0.10, 0.10) → 成功" in h and "窗口没焦点" in h
+    assert "type 'x'" in h
 
 
 def test_history_empty_at_start():
