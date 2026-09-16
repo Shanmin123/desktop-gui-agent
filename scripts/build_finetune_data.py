@@ -82,9 +82,24 @@ def fit_prompt(instruction, state, history, count_tokens, response="") -> tuple:
     return prompt, ELEMENT_STEPS[-1]
 
 
+def session_groups(rows: list, per_image_history: bool = False) -> list:
+    """把步骤按轨迹分组，组内保持文件里的先后顺序（ScreenAgent 的行就是按轨迹顺序排的）。
+
+    默认按 session 分，历史跨截图累积。第一版按「session + 截图」分，换一张屏历史就清空：
+    375 条动作样本里 250 条的「已执行」是空的，而真机推理时历史一直在——模型从第二步起
+    就落在没见过的输入分布里（25 个任务的真机评测里 24 个跑到步数上限、没主动收尾）。
+    per_image_history=True 复现第一版，用来复现 lora_2sp / q35_2sp 那批数据。
+    """
+    groups = {}
+    for r in rows:
+        key = (r["session_id"], r["image"]) if per_image_history else (r["session_id"],)
+        groups.setdefault(key, []).append(r)
+    return list(groups.values())
+
+
 def action_samples(split: str, ocr=None, count_tokens=None,
                    two_stage: bool = False, target_elements: bool = False,
-                   target_pad: float = 0.0) -> list:
+                   target_pad: float = 0.0, per_image_history: bool = False) -> list:
     """ScreenAgent 的可执行动作 -> 训练样本。
 
     三处和第一版不同，都是照着第一版掉分的原因改的：
@@ -94,8 +109,9 @@ def action_samples(split: str, ocr=None, count_tokens=None,
        element 编号」——模型没学过怎么用编号，于是写出 `14.0` 这种东西。
     2. `thought` 填人工修正过的说明文字，不再是空串。第一版教模型别写理由，
        动作类型准确率从 42.2% 掉到 30.6%。
-    3. 一份回复里的多个动作共用同一张截图，按顺序把前面的动作写进历史。
-       不这样做就是同一个输入配几个不同的目标动作，等于教一个矛盾的映射。
+    3. 按轨迹顺序把前面的动作写进历史（`session_groups`）。同一张截图上的多个动作靠历史
+       区分，否则就是同一个输入配几个不同的目标动作，等于教一个矛盾的映射；跨截图也要接着
+       累积，否则训练里三分之二的样本没有历史，和真机推理时的输入对不上。
 
     真值点落在某个 OCR 元素里就用 element 编号，否则给 point——提示词要求的就是
     这个取舍，让模型学会什么时候该用编号。
@@ -117,18 +133,18 @@ def action_samples(split: str, ocr=None, count_tokens=None,
         srcs.append(f)
 
     rows = [json.loads(line) for src in srcs for line in src.open(encoding="utf-8")]
-    out, groups = [], {}
-    for r in rows:
-        if Path(r["image"]).is_file():
-            groups.setdefault((r["session_id"], r["image"]), []).append(r)
-
-    for (_, image), steps_raw in groups.items():
-        img = imread(image)
-        h, w = img.shape[:2]
-        elements = ocr(img, image) if ocr else []
-        state = ScreenState(width=w, height=h, elements=elements)
+    out = []
+    for steps_raw in session_groups([r for r in rows if Path(r["image"]).is_file()],
+                                    per_image_history):
         history = []
+        image, img, state = None, None, None
         for r in steps_raw:
+            if r["image"] != image:      # 同一条轨迹里换了屏，重新读图和 OCR，历史不清空
+                image = r["image"]
+                img = imread(image)
+                h, w = img.shape[:2]
+                elements = ocr(img, image) if ocr else []
+                state = ScreenState(width=w, height=h, elements=elements)
             act = dict(r["action"])
             if act.get("point"):
                 act["point"] = [round(v, 4) for v in act["point"]]
@@ -514,6 +530,9 @@ def main() -> None:
                     help="动作样本改用两段式：提示词只问要操作哪个控件，回答里位置"
                          "写成 target 控件名，坐标留给第二段的定位提示词。"
                          "定位这一段仍然用基座自带的能力，不动它")
+    ap.add_argument("--per-image-history", action="store_true",
+                    help="换一张截图就清空「已执行」历史（第一版的做法，用来复现 lora_2sp / "
+                         "q35_2sp 那批数据）。默认按整条轨迹累积，和真机推理时的输入一致")
     ap.add_argument("--out", default=None,
                     help="train.jsonl / val.jsonl 写到哪。做对照组时换个目录，"
                          "免得把正在用的那份盖掉。裁剪图仍然共用 data/finetune/crops")
@@ -551,11 +570,13 @@ def main() -> None:
         train = action_samples(args.train_split, ocr=ocr, count_tokens=count_tokens,
                                two_stage=args.two_stage,
                                target_elements=args.target_elements,
-                               target_pad=args.target_pad)
+                               target_pad=args.target_pad,
+                               per_image_history=args.per_image_history)
         val = action_samples("val", ocr=ocr, count_tokens=count_tokens,
                              two_stage=args.two_stage,
                              target_elements=args.target_elements,
-                             target_pad=args.target_pad)
+                             target_pad=args.target_pad,
+                             per_image_history=args.per_image_history)
     finally:
         if per is not None:
             save_cache()

@@ -401,3 +401,24 @@ def test_responses_fit_under_the_generation_cap():
         over = [v for v in n if v > MAX_NEW_TOKENS]
         assert len(over) / len(n) <= 0.01, \
             f"{name}: {len(over)}/{len(n)} 条回答超过 {MAX_NEW_TOKENS} token，最长 {max(n)}"
+
+
+# --- 历史要跨截图累积 ---------------------------------------------------------
+
+
+def test_history_groups_by_session_not_by_screenshot():
+    """真机推理时「已执行」一直在，训练样本也得有：按截图分组会让三分之二的样本没有历史。"""
+    from build_finetune_data import session_groups
+
+    rows = [{"session_id": "s1", "image": "a.png"}, {"session_id": "s1", "image": "a.png"},
+            {"session_id": "s1", "image": "b.png"}, {"session_id": "s2", "image": "c.png"}]
+    assert [len(g) for g in session_groups(rows)] == [3, 1]
+    assert [r["image"] for r in session_groups(rows)[0]] == ["a.png", "a.png", "b.png"]
+
+
+def test_per_image_history_reproduces_the_delivered_dataset():
+    """交付的 q35_2sp / lora_2sp 用的是按截图分组那一版，要能复现。"""
+    from build_finetune_data import session_groups
+
+    rows = [{"session_id": "s1", "image": "a.png"}, {"session_id": "s1", "image": "b.png"}]
+    assert [len(g) for g in session_groups(rows, per_image_history=True)] == [1, 1]
