@@ -277,3 +277,20 @@ def test_x11_hotkey_reaches_the_backend_normalized():
     ctrl = Controller(backend=backend)
     assert ctrl.execute(Action(type="hotkey", text="Control_L+s")).ok
     assert backend.calls[-1] == ("hotkey", ("ctrl", "s"))
+
+
+def test_windows_style_and_prefixed_key_names():
+    """真机 live 里模型写过 Windows+E、LShift+Tab；都是同一个键的别的写法。"""
+    from gui_agent.control import normalize_hotkey
+
+    assert normalize_hotkey("Windows+e") == ["win", "e"]
+    assert normalize_hotkey("LShift+Tab") == ["shift", "tab"]
+    assert normalize_hotkey("LCtrl+LAlt+Delete") == ["ctrl", "alt", "delete"]
+
+
+def test_underscore_inside_a_key_name_is_joined_not_split():
+    """Print_Screen 的下划线是键名的一部分，拆开会得到不存在的 screen。"""
+    from gui_agent.control import normalize_hotkey
+
+    assert normalize_hotkey("Print_Screen") == ["printscreen"]
+    assert normalize_hotkey("Page_Down") == ["pagedown"]

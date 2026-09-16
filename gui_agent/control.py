@@ -57,6 +57,15 @@ _KEY_ALIAS = {
     "pgdn": "pagedown",
     "winleft": "win",
     "winright": "win",
+    "windows": "win",
+    "lwin": "win",
+    "rwin": "win",
+    "lshift": "shift",
+    "rshift": "shift",
+    "lctrl": "ctrl",
+    "rctrl": "ctrl",
+    "lalt": "alt",
+    "ralt": "alt",
     "ctrlleft": "ctrl",
     "ctrlright": "ctrl",
     "altleft": "alt",
@@ -140,10 +149,21 @@ def normalize_hotkey(text: str) -> List[str]:
     text = text.replace(" ", "").lower()
     for x11, canon in _X11_MODIFIERS.items():
         text = text.replace(x11, canon)
-    keys = [_KEY_ALIAS.get(k, k) for k in re.split(r"[+_]", text) if k]
+    known = valid_keys()
+    keys: List[str] = []
+    for token in (t for t in text.split("+") if t):
+        key = _KEY_ALIAS.get(token, token)
+        if known and key not in known and "_" in key:
+            joined = key.replace("_", "")
+            joined = _KEY_ALIAS.get(joined, joined)
+            if joined in known:          # print_screen → printscreen：下划线是键名里的
+                keys.append(joined)
+                continue
+            keys.extend(_KEY_ALIAS.get(p, p) for p in key.split("_") if p)   # alt_f4 → alt + f4
+            continue
+        keys.append(key)
     if not keys:
         raise ValueError(f"组合键为空：{text!r}")
-    known = valid_keys()
     unknown = [k for k in keys if known and k not in known]
     if unknown:
         raise ValueError(f"不认识的键名 {unknown}（组合键 {text!r}）")
