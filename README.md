@@ -95,8 +95,9 @@ python scripts/run_tasks.py --adapter checkpoints/q35_2sp --set suite --live --r
 `--resolution 1280x720` 临时切分辨率（结束后还原），`--model Qwen/Qwen2.5-VL-3B-Instruct` 换对照基座，
 `--api-base` 走 OpenAI 兼容接口。
 
-默认 dry-run。`--live` 会真实操作桌面，开始前有倒计时，鼠标甩到屏幕左上角可强制中断。live 实验建议放在虚拟机里，
-一条命令跑完计划的几批：`python scripts/vm/run_batches.py`，准备步骤见 `docs/虚拟机评测指南.md`。
+默认 dry-run。`--live` 会真实操作桌面，开始前有倒计时，鼠标甩到屏幕左上角可强制中断。真机跑之前按
+`docs/项目构建说明.md` 第七节的步骤来：确认没有聊天软件和可见浏览器窗口、存桌面状态、最小化窗口，跑完恢复
+并核对。要无人值守连着跑几批，用虚拟机：`python scripts/vm/run_batches.py`，准备步骤见 `docs/虚拟机评测指南.md`。
 
 ### 微调权重
 
@@ -112,6 +113,9 @@ python scripts/run_tasks.py --adapter checkpoints/q35_2sp --set suite --live --r
 「类型对且点准」要求动作类型对，坐标类动作还要点在真值 0.10 以内。微调训的是动作决策和任务拆解，定位那一问
 没训：挂上权重后 ScreenSpot 的图标目标会掉几个点（Qwen3.5 78.6% → 73.6%），因为训练样本的控件名都取自
 OCR 文字。完整对照见 `docs/第3周实验报告.md` 第七节和 `docs/系统全面评估报告.md`。
+
+真机跑 25 个任务的评测集（1280×720，每个任务 1 次）：`q35_2sp` 4/25，其中 T1 4/8、T2 0/9、T3 0/8；
+Qwen3.5 基座 0/25。差别主要在动作有没有效果——基座那一轮 250 步里屏幕一次都没变，微调后 274 步里变了 66 步。
 
 ## 测试
 
