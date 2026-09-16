@@ -228,3 +228,52 @@ def test_wait_seconds_configurable():
     t0 = _t.perf_counter()
     c.execute(Action("wait"))
     assert 0.03 < _t.perf_counter() - t0 < 0.5
+
+
+# --- 键名：模型写的是 ScreenAgent 那套 X11 风格 -------------------------------
+
+
+def test_x11_style_modifier_names_are_normalized():
+    """微调后的模型跟着训练数据写 Control_L+w、Shift_L+Tab，pyautogui 不认这些名字。"""
+    from gui_agent.control import normalize_hotkey
+
+    assert normalize_hotkey("Control_L+w") == ["ctrl", "w"]
+    assert normalize_hotkey("Shift_L+Tab") == ["shift", "tab"]
+    assert normalize_hotkey("Super_L+e") == ["win", "e"]
+
+
+def test_underscore_used_as_a_separator_is_split():
+    """Alt_F4 是把加号写成了下划线，拆开之后每一段都是认识的键。"""
+    from gui_agent.control import normalize_hotkey
+
+    assert normalize_hotkey("Alt_F4") == ["alt", "f4"]
+    assert normalize_hotkey("Control_L_c") == ["ctrl", "c"]
+
+
+def test_unknown_key_names_are_refused_instead_of_half_pressed():
+    """pyautogui 遇到不认识的键名会静默跳过，只按下组合键的一半，必须挡在前面。"""
+    import pytest as _pytest
+
+    from gui_agent.control import normalize_hotkey
+
+    with _pytest.raises(ValueError):
+        normalize_hotkey("ctrl+zzzz")
+
+
+def test_blocked_hotkeys_still_match_after_x11_normalization():
+    from gui_agent.control import Controller, RecordingBackend
+    from gui_agent.schema import Action
+
+    ctrl = Controller(backend=RecordingBackend())
+    result = ctrl.execute(Action(type="hotkey", text="Control_L+Alt_L+Delete"))
+    assert not result.ok and "禁用名单" in result.error
+
+
+def test_x11_hotkey_reaches_the_backend_normalized():
+    from gui_agent.control import Controller, RecordingBackend
+    from gui_agent.schema import Action
+
+    backend = RecordingBackend()
+    ctrl = Controller(backend=backend)
+    assert ctrl.execute(Action(type="hotkey", text="Control_L+s")).ok
+    assert backend.calls[-1] == ("hotkey", ("ctrl", "s"))

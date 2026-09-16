@@ -104,12 +104,50 @@ def command_segments(text: str) -> List[str]:
     return [s.strip() for s in re.split(r"[\n\r;&|]+", text) if s.strip()]
 
 
+# X11 风格的左右修饰键：ScreenAgent 的动作数据就是这么写的，微调后的模型跟着写
+# Control_L+w、Shift_L+Tab。先归一成不带方位的名字。
+_X11_MODIFIERS = {f"{name}_{side}": canon
+                  for name, canon in (("control", "ctrl"), ("ctrl", "ctrl"), ("alt", "alt"),
+                                      ("shift", "shift"), ("super", "win"), ("meta", "win"),
+                                      ("win", "win"))
+                  for side in ("l", "r")}
+
+_VALID_KEYS: Optional[frozenset] = None
+
+
+def valid_keys() -> frozenset:
+    """pyautogui 认识的键名。取不到（没装）就返回空集合，表示这一轮不做校验。"""
+    global _VALID_KEYS
+    if _VALID_KEYS is None:
+        try:
+            import pyautogui
+
+            _VALID_KEYS = frozenset(pyautogui.KEYBOARD_KEYS)
+        except Exception:
+            _VALID_KEYS = frozenset()
+    return _VALID_KEYS
+
+
 def normalize_hotkey(text: str) -> List[str]:
-    """把 'Ctrl+S' 这类写法拆成 pyautogui 认识的键名列表。"""
-    keys = [k.strip().lower() for k in text.replace(" ", "").split("+") if k.strip()]
+    """把 'Ctrl+S' 这类写法拆成 pyautogui 认识的键名列表。
+
+    两处实测出来的写法：模型跟着训练数据写 X11 风格的 Control_L+w；也会把加号写成下划线
+    （Alt_F4）。pyautogui 的键名里没有下划线，所以归一完修饰键之后，下划线一律当分隔符。
+
+    认不出来的键名直接报错：pyautogui 遇到不认识的名字会静默跳过，只按下组合键的一半，
+    日志里还记成执行成功。
+    """
+    text = text.replace(" ", "").lower()
+    for x11, canon in _X11_MODIFIERS.items():
+        text = text.replace(x11, canon)
+    keys = [_KEY_ALIAS.get(k, k) for k in re.split(r"[+_]", text) if k]
     if not keys:
         raise ValueError(f"组合键为空：{text!r}")
-    return [_KEY_ALIAS.get(k, k) for k in keys]
+    known = valid_keys()
+    unknown = [k for k in keys if known and k not in known]
+    if unknown:
+        raise ValueError(f"不认识的键名 {unknown}（组合键 {text!r}）")
+    return keys
 
 
 class PyAutoGUIBackend:
