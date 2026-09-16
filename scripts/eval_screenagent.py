@@ -71,6 +71,58 @@ def named_target(raw: str):
     return t.strip() if isinstance(t, str) and t.strip() else None
 
 
+# 指标按 GUI 智能体论文里常用的那套来，自造的名字没人能对照：
+#   Op.F1        动作类型的 F1（Mind2Web、SeeClick、OS-Atlas 都报这个）。macro 把少数类和多数类
+#                同权，micro 等于类型准确率。键盘动作还要求文本一致才算对，和 Mind2Web 对 TYPE
+#                比较输入内容的做法一致
+#   Step SR      这一步整体算不算做对：类型对，坐标类动作还要点得够准
+#   距离阈值     AITW 用「预测点与真值点的距离 ≤ 屏幕尺寸的 14%」判对，这里两档都报：
+#                0.14 与 AITW 对齐，0.10 是更严的自定档
+KEYBOARD_TYPES = ("type", "hotkey")
+
+
+def _text_ok(case: dict) -> bool:
+    """键盘动作的内容对不对。真值没写内容就不卡这一项。"""
+    gt_text = (case.get("gt_text") or "").strip()
+    if not gt_text:
+        return True
+    return (case.get("pred_text") or "").strip().lower() == gt_text.lower()
+
+
+def op_f1(cases: list) -> dict:
+    """按动作类型算 P / R / F1。键盘动作要内容也对。"""
+    types = sorted({c["gt"] for c in cases} | {c["pred"] for c in cases if c["pred"] != "解析失败"})
+    per, f1s = {}, []
+    for t in types:
+        pred_t = [c for c in cases if c["pred"] == t]
+        gt_t = [c for c in cases if c["gt"] == t]
+        hit = sum(1 for c in pred_t
+                  if c["gt"] == t and (t not in KEYBOARD_TYPES or _text_ok(c)))
+        p = hit / len(pred_t) if pred_t else 0.0
+        r = hit / len(gt_t) if gt_t else 0.0
+        f = 2 * p * r / (p + r) if p + r else 0.0
+        per[t] = {"precision": p, "recall": r, "f1": f, "gt": len(gt_t), "pred": len(pred_t)}
+        if gt_t:
+            f1s.append(f)
+    micro = sum(1 for c in cases
+                if c["gt"] == c["pred"] and (c["gt"] not in KEYBOARD_TYPES or _text_ok(c))) / len(cases)
+    return {"macro_f1": sum(f1s) / len(f1s) if f1s else 0.0, "micro_f1": micro, "per_type": per}
+
+
+def step_success(cases: list, threshold: float) -> float:
+    """一步算做对：类型对（键盘动作连内容一起对），坐标类动作的距离在阈值内。"""
+    ok = 0
+    for c in cases:
+        if c["gt"] != c["pred"]:
+            continue
+        if c["gt"] in KEYBOARD_TYPES and not _text_ok(c):
+            continue
+        if c.get("dist") is not None and c["dist"] > threshold:
+            continue
+        ok += 1
+    return ok / len(cases)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
@@ -154,7 +206,8 @@ def main() -> None:
                 n_parse_fail += 1
                 confusion[(gt["type"], "解析失败")] += 1
                 cases.append({"i": i, "gt": gt["type"], "pred": "解析失败",
-                              "target": named_target(raw), "why": str(e)[:80]})
+                              "target": named_target(raw), "why": str(e)[:80],
+                              "gt_text": gt.get("text")})
                 continue
             latencies.append(time.perf_counter() - t)
 
@@ -173,7 +226,8 @@ def main() -> None:
             # 只有混淆矩阵的话，「类型对了但点偏了」这种查不出来。
             cases.append({"i": i, "gt": gt["type"], "pred": pred.type,
                           "target": named_target(raw),
-                          "dist": None if d is None else round(d, 3)})
+                          "dist": None if d is None else round(d, 3),
+                          "gt_text": gt.get("text"), "pred_text": pred.text})
 
             if (i + 1) % 25 == 0:
                 print(f"  {i+1}/{len(recs)}  类型准确 {n_type_ok}/{i+1} = {n_type_ok/(i+1):.1%}")
@@ -199,6 +253,10 @@ def main() -> None:
     joint = sum(1 for c in cases if c["gt"] == c["pred"]
                 and (c.get("dist") is None or c["dist"] <= 0.10))
     print(f"类型对且点得准   {joint}/{n} = {joint/n:.1%}（坐标类动作要求距离 ≤ 0.10）")
+    f1 = op_f1(cases)
+    print(f"Op.F1            macro {f1['macro_f1']:.1%}，micro {f1['micro_f1']:.1%}（键盘动作要内容也对）")
+    print(f"Step SR          距离 ≤ 0.10 {step_success(cases, 0.10):.1%}，"
+          f"≤ 0.14（AITW 口径）{step_success(cases, 0.14):.1%}")
     print(f"平均单条耗时     {sum(latencies)/len(latencies):.2f}s")
 
     print("\n真值类型 -> 预测类型（前 15）：")
@@ -229,6 +287,8 @@ def main() -> None:
         "ground_truth_types": dict(gt_types),
         "confusion": {f"{g}->{p}": c for (g, p), c in confusion.items()},
         "joint_accuracy": joint / n,
+        "op_f1": op_f1(cases),
+        "step_success_rate": {"0.10": step_success(cases, 0.10), "0.14": step_success(cases, 0.14)},
         "cases": cases,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n结果已存到 {out}")
