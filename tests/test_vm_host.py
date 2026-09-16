@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import types
 from pathlib import Path
 
 import pytest
@@ -75,3 +76,70 @@ def test_paused_gpu_queue_creates_and_removes_the_pause_file(tmp_path, monkeypat
     with H.paused_gpu_queue(pause, timeout=100, busy=lambda: states.pop(0) if states else []):
         assert pause.exists()
     assert not pause.exists()
+
+
+# --- 恢复快照：等虚拟机真的关掉 -------------------------------------------------
+
+
+class _Vbox:
+    """假的 VBoxManage：showvminfo 按给定顺序报状态，其余命令只记下来。"""
+
+    def __init__(self, states):
+        self.states = list(states)
+        self.calls = []
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(cmd[1] if len(cmd) > 1 else "")
+        if "showvminfo" in cmd:
+            state = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+            return types.SimpleNamespace(stdout=f'VMState="{state}"\nname="agent-win11"\n', returncode=0)
+        return types.SimpleNamespace(stdout="", returncode=0)
+
+
+def _fake_clock(step=10.0):
+    now = [0.0]
+
+    def clock():
+        now[0] += step
+        return now[0]
+
+    return clock
+
+
+def test_restore_snapshot_waits_until_the_vm_is_really_off():
+    """poweroff 是异步的，没关干净就 restore 会被 VirtualBox 拒掉。"""
+    vbox = _Vbox(["running", "running", "poweroff"])
+    H.restore_snapshot("agent-win11", "clean", vboxmanage="vbox", run=vbox,
+                       sleep=lambda _s: None, clock=_fake_clock())
+    assert vbox.calls == ["controlvm", "showvminfo", "showvminfo", "showvminfo", "snapshot", "startvm"]
+
+
+def test_restore_snapshot_gives_up_if_the_vm_never_powers_off():
+    vbox = _Vbox(["running"])
+    with pytest.raises(SystemExit):
+        H.restore_snapshot("agent-win11", "clean", vboxmanage="vbox", run=vbox,
+                           sleep=lambda _s: None, clock=_fake_clock(step=30.0))
+    assert "snapshot" not in vbox.calls
+
+
+def test_vm_state_reads_the_machinereadable_output():
+    assert H.vm_state("agent-win11", "vbox", run=_Vbox(["saved"])) == "saved"
+    assert H.vm_state("agent-win11", "vbox", run=lambda *a, **k: types.SimpleNamespace(stdout="")) == ""
+
+
+# --- 回执 ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("receipt", [
+    {"exit_code": 1, "error": None},
+    {"exit_code": 0, "error": "ValueError: 参数不合法"},
+    {"exit_code": None, "error": None},
+])
+def test_a_batch_that_failed_in_the_vm_exits_non_zero(receipt):
+    """不抛的话 run_batches.py 会把失败的一批当成跑成了。"""
+    with pytest.raises(SystemExit):
+        H.check_receipt(receipt)
+
+
+def test_a_clean_receipt_passes():
+    H.check_receipt({"exit_code": 0, "error": None, "seconds": 12.3})

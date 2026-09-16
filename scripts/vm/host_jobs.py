@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 import urllib.request
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional
 
@@ -141,13 +141,39 @@ def model_server(model: str, adapter: Optional[str], port: int = 8000, timeout: 
         log.close()
 
 
+def vm_state(vm: str, vboxmanage: str = VBOXMANAGE, run: Callable = subprocess.run) -> str:
+    """VirtualBox 报的虚拟机状态：running / poweroff / saved …，查不到就返回空串。"""
+    out = run([vboxmanage, "showvminfo", vm, "--machinereadable"], capture_output=True, text=True)
+    for line in (getattr(out, "stdout", "") or "").splitlines():
+        if line.startswith("VMState="):
+            return line.split("=", 1)[1].strip().strip('"')
+    return ""
+
+
+OFF_STATES = ("poweroff", "aborted", "saved", "")
+
+
 def restore_snapshot(vm: str, snapshot: str, vboxmanage: str = VBOXMANAGE,
-                     run: Callable = subprocess.run) -> None:
-    """关机 → 恢复快照 → 无界面开机。快照里要已经配好自动登录和 worker 开机自启。"""
+                     run: Callable = subprocess.run, sleep: Optional[Callable] = None,
+                     clock: Optional[Callable] = None) -> None:
+    """关机 → 等它真的关掉 → 恢复快照 → 无界面开机。快照里要配好自动登录和 worker 开机自启。
+
+    关机要等：poweroff 是异步的。原来固定等 3 秒，机器慢一点时 snapshot restore 会撞上
+    「虚拟机还在运行」直接失败，一批 live 实验就断在这里。
+    """
     run([vboxmanage, "controlvm", vm, "poweroff"], capture_output=True)   # 本来就关着会报错，忽略
-    time.sleep(3)
+    if not wait_for(lambda: vm_state(vm, vboxmanage, run) in OFF_STATES, timeout=120, poll=2,
+                    sleep=sleep, clock=clock):
+        raise SystemExit(f"{vm} 两分钟内没有关机，先手动关掉再跑")
     run([vboxmanage, "snapshot", vm, "restore", snapshot], check=True)
     run([vboxmanage, "startvm", vm, "--type", "headless"], check=True)
+
+
+def check_receipt(receipt: dict) -> None:
+    """虚拟机里跑失败就让这一批以非零码退出，否则 run_batches.py 会把它当成跑成了。"""
+    if receipt.get("error") or receipt.get("exit_code") != 0:
+        raise SystemExit(f"这一批在虚拟机里没跑成：exit={receipt.get('exit_code')}，"
+                         f"错误 {receipt.get('error')}；看交换目录 out/ 里的输出")
 
 
 def main() -> None:
@@ -168,9 +194,9 @@ def main() -> None:
     exchange = Path(args.exchange)
     worker.validate_args(run_args)
 
-    pause = (lambda: contextmanager(lambda: (yield))()) if args.no_pause else paused_gpu_queue
+    pause = nullcontext if args.no_pause else paused_gpu_queue
     serve = (lambda: model_server(args.serve_model, args.serve_adapter, args.port)) if args.serve_model \
-        else (lambda: contextmanager(lambda: (yield))())
+        else nullcontext
 
     with pause():
         with serve():
@@ -191,6 +217,7 @@ def main() -> None:
             copied = collect(exchange, job.stem, ROOT / "logs")
             print(f"回执：exit={receipt['exit_code']} 用时 {receipt['seconds']}s 错误 {receipt['error']}")
             print(f"拷回 logs/：{copied}")
+            check_receipt(receipt)
 
 
 if __name__ == "__main__":

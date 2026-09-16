@@ -14,7 +14,7 @@
 
 用法：
     python scripts/summarize_suite.py              # logs/ 下 live 跑的 tasks_*suite*.json
-    python scripts/summarize_suite.py logs/tasks_vm_q35_2sp_suite_suite.json logs/tasks_vm_q35_base_suite_suite.json
+    python scripts/summarize_suite.py logs/tasks_vm_q35_2sp_suite.json logs/tasks_vm_q35_base_suite.json
 """
 
 from __future__ import annotations
