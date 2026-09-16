@@ -129,6 +129,7 @@ def chart_screenspot(plt) -> bool:
 def chart_tokens(plt) -> bool:
     fig, ax = plt.subplots(figsize=(6, 4))
     drawn = False
+    seen = set()
     for label, points in TOKEN_CURVES.items():
         xs, ys = [], []
         for tokens, name in points:
@@ -137,6 +138,7 @@ def chart_tokens(plt) -> bool:
                 total = d["accuracy"]["总体"]
                 xs.append(tokens)
                 ys.append(total["hit"] / total["total"])
+        seen.update(xs)
         if xs:
             ax.plot(xs, ys, marker="o", label=label)
             for x, y in zip(xs, ys):
@@ -147,6 +149,10 @@ def chart_tokens(plt) -> bool:
         plt.close(fig)
         return False
     ax.set_xscale("log", base=2)
+    # 刻度直接标实测的几档，别让 matplotlib 标成 2^9、2^10
+    ax.set_xticks(sorted(seen))
+    ax.set_xticklabels([str(x) for x in sorted(seen)])
+    ax.minorticks_off()
     ax.set_xlabel("视觉 token 上限")
     ax.set_ylabel("ScreenSpot 桌面准确率")
     ax.set_title("图片分辨率（视觉 token 预算）对定位的影响")
@@ -210,6 +216,20 @@ def chart_training(plt) -> bool:
     return True
 
 
+# 日志名到图例名：日志名带 live_ / vm_ 前缀和 _suite 后缀，图上读着费劲
+SUITE_LABELS = {
+    "q35_2sp": "Qwen3.5 微调", "q35_base": "Qwen3.5 基座", "q25_2sp": "Qwen2.5 微调",
+    "q35_2sp_1080p": "Qwen3.5 微调 1920×1080",
+}
+
+
+def suite_label(stem: str) -> str:
+    name = stem.replace("tasks_", "").removesuffix("_suite")
+    for prefix in ("live_", "vm_"):
+        name = name.removeprefix(prefix)
+    return SUITE_LABELS.get(name, name)
+
+
 def chart_suite(plt) -> bool:
     runs = []
     for path in sorted(LOGS.glob("tasks_*suite*.json")):
@@ -217,7 +237,7 @@ def chart_suite(plt) -> bool:
         records = (d or {}).get("records") or []
         if not records or not any(r.get("level") for r in records):
             continue
-        label = path.stem.replace("tasks_", "")
+        label = suite_label(path.stem)
         rates = []
         for level in ("T1", "T2", "T3"):
             group = [r for r in records if r.get("level") == level]

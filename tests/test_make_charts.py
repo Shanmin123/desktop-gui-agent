@@ -57,3 +57,18 @@ def test_joint_accuracy_is_recomputed_from_cases_for_old_logs():
                            {"gt": "click", "pred": "click", "dist": 0.2},
                            {"gt": "type", "pred": "type", "dist": None}]}
     assert C.joint_accuracy(d) == pytest.approx(2 / 3)
+
+
+def test_suite_labels_are_readable():
+    """图例名不要直接用日志文件名。"""
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location("make_charts", root / "scripts" / "make_charts.py")
+    charts = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(charts)
+
+    assert charts.suite_label("tasks_live_q35_2sp_suite") == "Qwen3.5 微调"
+    assert charts.suite_label("tasks_vm_q35_base_suite") == "Qwen3.5 基座"
+    assert charts.suite_label("tasks_something_else_suite") == "something_else"
