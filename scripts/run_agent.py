@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from gui_agent.agent import Agent
 from gui_agent.control import Controller, PyAutoGUIBackend
 from gui_agent.monitor import Monitor
-from gui_agent.models import DEFAULT_MODEL, add_backend_args, load_vlm
+from gui_agent.models import add_backend_args, load_vlm
 from gui_agent.perception import Perception
 
 ROOT = Path(__file__).resolve().parents[1]

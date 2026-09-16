@@ -174,7 +174,9 @@ def check_adapter_base(adapter: str, model_id: str) -> None:
         return
     with open(cfg, encoding="utf-8") as f:
         base = json.load(f).get("base_model_name_or_path") or ""
-    name = lambda x: x.replace("\\", "/").rstrip("/").split("/")[-1]
+    def name(x: str) -> str:
+        return x.replace(chr(92), "/").rstrip("/").split("/")[-1]
+
     if base and name(base) != name(model_id):
         raise ValueError(f"适配器 {adapter} 是在 {base} 上训的，不能挂到 {model_id} 上（加 --model {base}）")
 

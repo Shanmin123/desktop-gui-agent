@@ -32,7 +32,7 @@ from gui_agent.agent import Agent
 from gui_agent.control import Controller, PyAutoGUIBackend
 from gui_agent.monitor import Monitor
 from gui_agent.display import resolution as use_resolution
-from gui_agent.models import DEFAULT_MODEL, FlakyVLM, add_backend_args, load_vlm
+from gui_agent.models import FlakyVLM, add_backend_args, load_vlm
 from gui_agent.perception import Perception
 from gui_agent.suite import suite_tasks
 from gui_agent.tasks import basic_tasks, complex_tasks

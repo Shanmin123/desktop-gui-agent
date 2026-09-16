@@ -1,5 +1,4 @@
 from gui_agent.tasks import (
-    SCRATCH,
     Task,
     basic_tasks,
     file_contains,
