@@ -263,6 +263,7 @@ QWEN25_NAMES = [
     "model.language_model.layers.0.self_attn.v_proj", "model.language_model.layers.0.self_attn.o_proj",
     "model.language_model.layers.0.mlp.gate_proj", "model.language_model.layers.0.mlp.up_proj",
     "model.language_model.layers.0.mlp.down_proj", "lm_head",
+    "model.visual.merger.mlp.0", "model.visual.merger.mlp.2",
 ]
 QWEN35_NAMES = [
     "model.visual.blocks.0.attn.qkv", "model.visual.blocks.0.attn.proj",
@@ -272,6 +273,7 @@ QWEN35_NAMES = [
     "model.language_model.layers.0.linear_attn.out_proj",
     "model.language_model.layers.3.self_attn.q_proj", "model.language_model.layers.3.self_attn.o_proj",
     "model.language_model.layers.3.mlp.gate_proj", "lm_head",
+    "model.visual.merger.linear_fc1", "model.visual.merger.linear_fc2",
 ]
 
 
@@ -355,3 +357,66 @@ def test_answer_only_leaves_the_inputs_whole():
     labels = torch.tensor([[train_lora.IGNORE] * 3 + [3, 4]])
     b = train_lora.answer_only({"input_ids": ids, "labels": labels})
     assert torch.equal(b["input_ids"], ids) and b["logits_to_keep"] == 3
+
+
+def test_lora_nogate_targets_skip_the_per_head_gate_projections():
+    """in_proj_a / in_proj_b 每个头只输出一个标量（衰减门和写入强度），不是注意力投影。"""
+    got = _matched(train_lora.lora_target_regex(QWEN35_NAMES, "attn_nogate"), QWEN35_NAMES)
+    suffixes = {n.rsplit(".", 1)[-1] for n in got}
+    assert {"in_proj_qkv", "in_proj_z", "out_proj", "q_proj", "o_proj"} <= suffixes
+    assert not ({"in_proj_a", "in_proj_b"} & suffixes)
+
+
+def test_lora_nogate_equals_attn_on_qwen25():
+    """Qwen2.5 没有门控投影，两种写法挂到的层一样，老结果仍可复现。"""
+    assert (_matched(train_lora.lora_target_regex(QWEN25_NAMES, "attn_nogate"), QWEN25_NAMES)
+            == _matched(train_lora.lora_target_regex(QWEN25_NAMES, "attn"), QWEN25_NAMES))
+
+
+def test_lora_targets_can_add_the_vision_merger():
+    """对齐层（merger）默认不挂，加上之后语言模型那部分不变，视觉塔的 block 仍然不碰。"""
+    plain = _matched(train_lora.lora_target_regex(QWEN35_NAMES, "attn"), QWEN35_NAMES)
+    got = _matched(train_lora.lora_target_regex(QWEN35_NAMES, "attn", with_merger=True), QWEN35_NAMES)
+    assert got - plain == {"model.visual.merger.linear_fc1", "model.visual.merger.linear_fc2"}
+    assert not any(".blocks." in n for n in got)
+
+
+def test_lora_merger_targets_cover_both_generations_naming():
+    """Qwen2.5-VL 的对齐层叫 merger.mlp.0/2，Qwen3.5 叫 merger.linear_fc1/2。"""
+    got = _matched(train_lora.lora_target_regex(QWEN25_NAMES, "attn", with_merger=True), QWEN25_NAMES)
+    assert {"model.visual.merger.mlp.0", "model.visual.merger.mlp.2"} <= got
+    assert not any(".blocks." in n for n in got)
+
+
+def test_lora_merger_fails_loudly_when_the_model_has_none():
+    with pytest.raises(ValueError):
+        train_lora.lora_target_regex(["model.language_model.layers.0.self_attn.q_proj"],
+                                     "attn", with_merger=True)
+
+
+def test_merger_modules_for_full_training_found_in_both_generations():
+    """全量训练对齐层时交给 PEFT 的 modules_to_save，两代都定位到 visual.merger。"""
+    assert train_lora.merger_modules(QWEN25_NAMES) == ["model.visual.merger"]
+    assert train_lora.merger_modules(QWEN35_NAMES) == ["model.visual.merger"]
+
+
+def test_merger_modules_fail_loudly_when_the_model_has_none():
+    with pytest.raises(ValueError):
+        train_lora.merger_modules(["model.language_model.layers.0.self_attn.q_proj"])
+
+
+def test_best_step_picks_the_lowest_validation_loss():
+    """579 条数据训 6 轮会过拟合，交付的应该是验证 loss 最低那一步的权重。"""
+    steps = [{"step": 50, "loss": 1.5}, {"step": 100, "loss": 1.2, "val_loss": 1.11},
+             {"step": 150, "loss": 0.9, "val_loss": 1.23}, {"step": 200, "loss": 0.5, "val_loss": 1.40}]
+    assert train_lora.best_step(steps) == (100, 1.11)
+
+
+def test_best_step_returns_nothing_when_never_validated():
+    assert train_lora.best_step([{"step": 50, "loss": 1.5}]) == (None, None)
+
+
+def test_merger_skip_list_keeps_lm_head_unquantized():
+    """显式传 llm_int8_skip_modules 会覆盖默认列表，漏掉 lm_head 会让 4-bit 加载在前向时断言失败。"""
+    assert "lm_head" in train_lora.MERGER_LINEARS
+    assert {"mlp.0", "mlp.2"} <= set(train_lora.MERGER_LINEARS)

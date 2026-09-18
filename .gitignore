@@ -24,3 +24,6 @@ logs/*
 task_plan.md
 findings.md
 progress.md
+
+# 会话临时脚本，不进仓库
+scratchpad/

@@ -18,6 +18,7 @@ import argparse
 import json
 import math
 import random
+import re
 import sys
 import time
 from pathlib import Path
@@ -46,9 +47,14 @@ def load_rows(split: str, limit=None) -> list:
 ATTENTION_PROJ = ("q_proj", "k_proj", "v_proj", "o_proj",
                   "in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj")
 MLP_PROJ = ("gate_proj", "up_proj", "down_proj")
+# Gated DeltaNet 的状态门：in_proj_b 出 beta = sigmoid(b)（写入强度），in_proj_a 出
+# g = -exp(A_log) * softplus(a + dt_bias)（遗忘率），每个头只输出一个标量（2560 -> 32）。
+# r=16 挂上去秩已到满秩一半，旁路参数是原矩阵的 51%，占全部 LoRA 参数 13.8%，
+# 而这两层的权重只占被挂层的 0.30%。attn_nogate 就是把它们摘掉的对照。
+GATE_PROJ = ("in_proj_a", "in_proj_b")
 
 
-def lora_target_regex(linear_names, which: str = "attn") -> str:
+def lora_target_regex(linear_names, which: str = "attn", with_merger: bool = False) -> str:
     """语言模型里实际存在的投影层，拼成 PEFT 的 target_modules 正则。
 
     视觉塔一律不挂：Qwen2.5-VL 视觉塔的 MLP 也叫 gate_proj / up_proj / down_proj，
@@ -57,13 +63,53 @@ def lora_target_regex(linear_names, which: str = "attn") -> str:
     if which == "qkvo":
         # 只挂全注意力。Qwen3.5 里 32 层只有 8 层是全注意力，用来对照「线性注意力要不要挂」
         want = ("q_proj", "k_proj", "v_proj", "o_proj")
+    elif which == "attn_nogate":
+        want = tuple(n for n in ATTENTION_PROJ if n not in GATE_PROJ)
     else:
         want = ATTENTION_PROJ + (MLP_PROJ if which == "all" else ())
     found = sorted({n.rsplit(".", 1)[-1] for n in linear_names
                     if "visual" not in n and n.rsplit(".", 1)[-1] in want})
     if not found:
         raise ValueError(f"模型里找不到要挂 LoRA 的投影层（{which}）")
-    return r"^(?!.*visual).*\.(" + "|".join(found) + r")$"
+    regex = r"^(?!.*visual).*\.(" + "|".join(found) + r")$"
+    if with_merger:
+        # 视觉塔的对齐层（projection）。两代叫法不同：Qwen2.5-VL 是 merger.mlp.0 / mlp.2
+        # （nn.Sequential），Qwen3.5 是 merger.linear_fc1 / linear_fc2，所以按模型里的实际名字拼。
+        names = sorted({n.split(".merger.", 1)[1] for n in linear_names if ".merger." in n})
+        if not names:
+            raise ValueError("模型里找不到视觉塔的对齐层（merger）")
+        regex += r"|^.*\.merger\.(" + "|".join(re.escape(x) for x in names) + r")$"
+    return regex
+
+
+# 全量训练对齐层时要让它不被量化。transformers 的跳过规则是按线性层自己的名字匹配，
+# 写模块路径（"visual"）或父模块名（"merger"）都不生效，实测要写到叶子这一层。
+# 两代的叫法都列上：Qwen2.5-VL 是 mlp.0 / mlp.2，Qwen3.5 是 linear_fc1 / linear_fc2。
+# lm_head 必须一起列上：显式传 llm_int8_skip_modules 会覆盖 transformers 的默认跳过列表，
+# 而默认列表里本来就有 lm_head。它和词嵌入共享权重，被量化后 bitsandbytes 会断言失败。
+MERGER_LINEARS = ["lm_head", "mlp.0", "mlp.2", "linear_fc1", "linear_fc2"]
+
+
+def best_step(steps: list) -> tuple:
+    """验证 loss 最低的那次更新，返回 (步数, loss)；没验证过就返回 (None, None)。
+
+    579 条数据配几千万可训练参数，实测两轮左右就到最优，再训验证 loss 会回升
+    （150 步 1.11 -> 300 步 1.23）。交付的应该是这一步的权重，不是最后一步的。
+    """
+    evals = [(s["step"], s["val_loss"]) for s in steps if s.get("val_loss") is not None]
+    return min(evals, key=lambda x: x[1]) if evals else (None, None)
+
+
+def merger_modules(linear_names) -> list:
+    """全量训练对齐层时交给 PEFT 的 modules_to_save。
+
+    两代的对齐层路径都是 visual.merger，只是里面的线性层叫法不同（Qwen2.5-VL 是
+    mlp.0 / mlp.2，Qwen3.5 是 linear_fc1 / linear_fc2），所以按整个 merger 模块来存。
+    """
+    names = {n.split(".merger.")[0] + ".merger" for n in linear_names if ".merger." in n}
+    if not names:
+        raise ValueError("模型里找不到视觉塔的对齐层（merger）")
+    return sorted(names)
 
 
 def est_tokens(row: dict, tokenizer, max_pixels_blocks: int, factor: int = 28) -> int:
@@ -144,10 +190,20 @@ def main() -> None:
     ap.add_argument("--lora-alpha", type=int, default=None,
                     help="默认 2 倍的 rank。SeeClick 用的是固定 16")
     ap.add_argument("--lora-dropout", type=float, default=0.05)
-    ap.add_argument("--lora-targets", default="attn", choices=["attn", "qkvo", "all"],
+    ap.add_argument("--lora-targets", default="attn", choices=["attn", "attn_nogate", "qkvo", "all"],
                     help="attn 挂语言模型里全部注意力投影（Qwen2.5-VL 是 q/k/v/o，Qwen3.5 另含"
-                         "线性注意力的 in_proj_*/out_proj）；qkvo 只挂全注意力的 q/k/v/o；"
+                         "线性注意力的 in_proj_*/out_proj）；attn_nogate 再摘掉 Gated DeltaNet 的"
+                         "两个状态门 in_proj_a/in_proj_b；qkvo 只挂全注意力的 q/k/v/o；"
                          "all 再加 MLP，ShowUI 训 Qwen2-VL 用的就是 all")
+    ap.add_argument("--keep-best", action="store_true",
+                    help="只在验证 loss 创新低时存权重，交付最优那一步而不是最后一步。"
+                         "小数据容易过拟合，配合调小 --eval-every 用")
+    ap.add_argument("--train-merger", default="no", choices=["no", "lora", "full"],
+                    help="视觉塔对齐层（projection）怎么训。no 冻结，只调语言模型，适合只改回答方式；"
+                         "lora 给对齐层挂 LoRA；full 全量训练对齐层，是「图能看懂但领域对齐不好」时的"
+                         "推荐做法，这时视觉塔不做 4-bit 量化")
+    ap.add_argument("--merger-lr", type=float, default=None,
+                    help="对齐层单独的学习率，默认取 --lr 的两倍：这部分参数少，收敛要更快一点")
     ap.add_argument("--weight-decay", type=float, default=0.01,
                     help="AdamW 的默认值是 0.01，SeeClick 用 0.1")
     ap.add_argument("--adam-beta2", type=float, default=0.999,
@@ -219,8 +275,13 @@ def main() -> None:
     if args.load_in_4bit:
         from transformers import BitsAndBytesConfig
 
+        # 全量训练对齐层时它不能量化：4-bit 的权重没法直接更新。transformers 的跳过规则按
+        # 模块名精确匹配，不是路径子串，所以写 "visual" 不管用，得写 "merger"；这样也只有
+        # 对齐层留在 bf16，视觉塔其余 block 照样 4-bit。
+        skip = MERGER_LINEARS if args.train_merger == "full" else None
         kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4")
+            load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_quant_type="nf4",
+            llm_int8_skip_modules=skip)
     else:
         kwargs["dtype"] = torch.bfloat16
     model = AutoModelForImageTextToText.from_pretrained(args.model, **kwargs)
@@ -237,12 +298,16 @@ def main() -> None:
         model = PeftModel.from_pretrained(model, args.init_adapter, is_trainable=True)
         print(f"接着 {args.init_adapter} 的权重训")
     else:
-        targets = lora_target_regex(
-            [n for n, m in model.named_modules() if isinstance(m, torch.nn.Linear)], args.lora_targets)
+        linear_names = [n for n, m in model.named_modules() if isinstance(m, torch.nn.Linear)]
+        targets = lora_target_regex(linear_names, args.lora_targets,
+                                    with_merger=args.train_merger == "lora")
+        keep = merger_modules(linear_names) if args.train_merger == "full" else None
         print(f"LoRA 目标：{targets}")
+        if keep:
+            print(f"全量训练：{keep}")
         model = get_peft_model(model, LoraConfig(
             r=args.rank, lora_alpha=args.lora_alpha or args.rank * 2,
-            lora_dropout=args.lora_dropout, bias="none",
+            lora_dropout=args.lora_dropout, bias="none", modules_to_save=keep,
             task_type="CAUSAL_LM", target_modules=targets))
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
@@ -259,7 +324,16 @@ def main() -> None:
         train = [r for r in train if id(r) in keep]
         print(f"按长度预筛掉 {len(too_long)} 条超长样本，剩 {len(train)} 条")
 
-    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr,
+    merger_lr = args.merger_lr or args.lr * 2
+    on_merger = [p for n, p in model.named_parameters() if p.requires_grad and ".merger." in n]
+    on_lm = [p for n, p in model.named_parameters() if p.requires_grad and ".merger." not in n]
+    groups = [{"params": on_lm, "lr": args.lr}]
+    max_lr = args.lr
+    if on_merger:
+        groups.append({"params": on_merger, "lr": merger_lr})
+        max_lr = [args.lr, merger_lr]
+        print(f"对齐层单独一组：{sum(p.numel() for p in on_merger) / 1e6:.2f} M，学习率 {merger_lr:.1e}")
+    opt = torch.optim.AdamW(groups, lr=args.lr,
                             weight_decay=args.weight_decay, betas=(0.9, args.adam_beta2))
     total = math.ceil(len(train) * args.epochs / args.accum)
     if args.scheduler == "cosine":
@@ -270,7 +344,7 @@ def main() -> None:
             num_training_steps=max(total, 1))
     else:
         sched = torch.optim.lr_scheduler.OneCycleLR(
-            opt, max_lr=args.lr, total_steps=max(total, 1), pct_start=args.warmup_ratio)
+            opt, max_lr=max_lr, total_steps=max(total, 1), pct_start=args.warmup_ratio)
 
     def evaluate() -> float:
         model.eval()
@@ -285,19 +359,20 @@ def main() -> None:
         return sum(losses) / len(losses) if losses else float("nan")
 
     OUTPUT.mkdir(exist_ok=True)
+    best = (0, float("inf"))
     n_lora = sum(1 for _, m in model.named_modules() if hasattr(m, "lora_A"))
     print(f"挂了 LoRA 的层 {n_lora} 个，切块系数 {factor}")
     log = {"args": vars(args), "train_size": len(train), "kinds": kinds, "steps": [],
            "base_model_type": getattr(model.config, "model_type", None),
            "patch_factor": factor, "lora_layers": n_lora}
 
-    def save(step: int, log: dict, t_start: float, skipped: int) -> None:
+    def save(step: int, log: dict, t_start: float, skipped: int, tag_suffix=None) -> None:
         """存一次权重，顺手把「这份权重练了多少步」写清楚。
 
         只有最后存一次的话，中途卡死就什么都拿不到。适配器只有 7.4 M 参数，
         存一次不到一秒，多存几次不心疼。
         """
-        out = OUTPUT / args.tag
+        out = OUTPUT / (args.tag if tag_suffix is None else args.tag + tag_suffix)
         model.save_pretrained(out)
         (ROOT / "logs" / f"train_{args.tag}.json").write_text(json.dumps(
             {**log, "saved_at_step": step, "planned_steps": total,
@@ -338,10 +413,17 @@ def main() -> None:
                     log["steps"].append({"step": step, "epoch": epoch + 1, "loss": round(avg, 4)})
                 if args.eval_every and step % args.eval_every == 0:
                     v = evaluate()
-                    print(f"    验证 loss {v:.4f}")
                     log["steps"][-1]["val_loss"] = round(v, 4)
+                    if args.keep_best and v < best[1]:
+                        best = (step, v)
+                        log["best_step"], log["best_val_loss"] = step, round(v, 4)
+                        save(step, log, t_start, skipped)
+                        print(f"    验证 loss {v:.4f}（新低，已存）")
+                    else:
+                        print(f"    验证 loss {v:.4f}"
+                              + (f"（最优仍是第 {best[0]} 步 {best[1]:.4f}）" if args.keep_best else ""))
                 if args.save_every and step % args.save_every == 0:
-                    save(step, log, t_start, skipped)
+                    save(step, log, t_start, skipped, "_last" if args.keep_best else None)
                     # 顺手把分配器占着不用的块还回去：样本长度差一倍多，碎片攒得快，
                     # 整卡占满之后会明显变慢。不要放到每次更新——4-bit 每次前向都要
                     # 反量化权重，每步清缓存会把那些临时缓冲区反复重分配，实测每次
