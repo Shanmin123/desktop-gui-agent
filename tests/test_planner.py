@@ -496,3 +496,69 @@ def test_placeholder_is_the_same_sentence_used_for_training_and_offline_eval():
     root = pathlib.Path(__file__).resolve().parents[1]
     for rel in ("scripts/build_finetune_data.py", "scripts/eval_plan.py"):
         assert NO_ELEMENTS in (root / rel).read_text(encoding="utf-8"), rel
+
+
+# --- 长链路：模拟真实用户从头走到尾的完整流程 -------------------------------
+
+
+def _act(kind="click", eid=0, text="abc"):
+    """一条合法动作：点击类给元素编号，键盘类必须带内容，否则会被判成失败步。"""
+    if kind in ("type", "hotkey"):
+        return '{"action": {"type": "%s", "text": "%s"}}' % (kind, "ctrl+s" if kind == "hotkey" else text)
+    return '{"action": {"type": "%s", "element": %d}}' % (kind, eid)
+
+
+def _reflect(situation):
+    return '{"situation": "%s"}' % situation
+
+
+def test_long_chain_walks_through_every_subtask_with_replans(screen):
+    """一条 16 步的长链路：4 个子任务、中间两次重拆、每个子任务多步才推进。
+
+    短用例只能证明每个分支自己不出错；这条用来证明它们连起来也不跑偏——子任务按顺序推进、
+    重拆替换掉剩下的计划、历史一直带着、步数预算够用时能走到收尾。
+    """
+    script = [
+        '["打开记事本", "输入三行文字", "另存为", "确认覆盖"]',
+        # 子任务 1：两步才成
+        _act(), _reflect(RETRY),
+        _act(), _reflect(SUCCESS),
+        # 子任务 2：三步。三步的内容必须各不相同，连续 3 次同一个动作会被卡住检测终止
+        _act("type", text="苹果"), _reflect(RETRY),
+        _act("type", text="香蕉"), _reflect(RETRY),
+        _act("type", text="橙子"), _reflect(SUCCESS),
+        # 子任务 3：走不通，重拆一次
+        _act("hotkey"), _reflect(REFORMULATE),
+        '["填写文件名", "点保存"]',
+        _act("type", text="fruits.txt"), _reflect(SUCCESS),
+        # 新计划的第二个子任务又走不通，再重拆一次（达到上限 2）
+        _act("click", eid=1), _reflect(REFORMULATE),
+        '["点保存按钮"]',
+        _act(), _reflect(SUCCESS),
+    ]
+    vlm = ScriptedVLM(script)
+    a = Agent(FakePerception(screen), Controller(backend=RecordingBackend(1024, 768)),
+              vlm, plan=True, max_steps=20, max_replans=2, retry_backoff=0)
+    t = a.run("把三行文字写进文件并另存")
+
+    assert t.reflections == [RETRY, SUCCESS, RETRY, RETRY, SUCCESS,
+                            REFORMULATE, SUCCESS, REFORMULATE, SUCCESS]
+    assert t.subtasks == ["点保存按钮"], "第二次重拆后剩下的计划要换成新的"
+    # 9 个脚本里的动作步，加最后计划做完时的一步收尾；重拆本身不占步数
+    assert t.n_steps == 10
+    assert t.success is True
+    # 历史一路带着：最后一次动作提示词里要能看到前面第 8、9 步
+    last_action_prompt = next(q for q in reversed(vlm.prompts) if "第9步" in q)
+    assert "第8步" in last_action_prompt
+
+
+def test_long_chain_without_plan_keeps_history_and_does_not_misfire_stuck(screen):
+    """不开拆解的 15 步长链路：动作各不相同，不应被卡住检测提前终止。"""
+    vlm = ScriptedVLM([_act("click", i % 2) for i in range(14)]
+                      + ['{"action": {"type": "finished"}}'])
+    a = Agent(FakePerception(screen), Controller(backend=RecordingBackend(1024, 768)),
+              vlm, max_steps=20, retry_backoff=0)
+    t = a.run("连着做很多步")
+    assert t.success is True
+    assert t.n_steps == 15
+    assert "第14步" in vlm.prompts[-1]
