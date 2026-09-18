@@ -14,6 +14,7 @@
     python scripts/score_actions.py logs/screenagent_q35_hist_2s.json
 """
 
+import collections
 import importlib.util
 import json
 import sys
@@ -71,11 +72,28 @@ def main() -> None:
 
     print("\n按动作类型的 F1（只列真值里出现过的）：")
     types = sorted({t for r in rows for t in r["per_type"]})
+    # 第一行给每类在测试集里的真值条数：macro 是按类平均，只有 8 条真值的 right_single
+    # 和 181 条的 click 权重一样，不给支持数就没法判断 macro 掉在哪、掉得有没有意义。
+    support = collections.Counter()
+    for pth in paths:
+        try:
+            d = json.loads(pth.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if d.get("cases"):
+            support = collections.Counter(c["gt"] for c in d["cases"])
+            break
     print("| 配置 | " + " | ".join(types) + " |")
     print("|---|" + "---|" * len(types))
+    print("| 真值条数 | " + " | ".join(str(support.get(t, 0)) for t in types) + " |")
     for r in rows:
         print(f"| {r['name']} | " + " | ".join(
             f"{r['per_type'][t]:.2f}" if t in r["per_type"] else "—" for t in types) + " |")
+    thin = [t for t in types if 0 < support.get(t, 0) < 15]
+    if thin:
+        print()
+        print("真值不足 15 条的类型：" + "、".join(thin)
+              + "。macro 按类平均，这些类的 F1 抖动大，读 macro 时要一并看 micro。")
 
 
 if __name__ == "__main__":

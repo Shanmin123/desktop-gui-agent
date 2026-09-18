@@ -4,7 +4,7 @@
 
   screenspot_by_category.png   ScreenSpot 桌面 334 条，按平台和元素类型分组的定位准确率
   screenspot_vs_tokens.png     视觉 token 预算和定位准确率的关系
-  screenagent_metrics.png      ScreenAgent test 353 条：动作类型准确率、类型对且点准、键盘召回
+  screenagent_metrics.png      ScreenAgent test 353 条：Op.F1（macro/micro）与 Step SR（≤0.10/≤0.14）
   prompt_variants.png          两段式提示词变体（tune_prompt.py --mode two_stage）
   training_loss.png            两个基座上交付配方的训练 loss
   suite_by_level.png           25 个任务评测集按难度档的成功率（跑过 live 才有）
@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
@@ -24,28 +25,31 @@ ROOT = Path(__file__).resolve().parents[1]
 LOGS = ROOT / "logs"
 OUT = ROOT / "docs" / "figures"
 
+# 指标一律用 eval_screenagent.py 里的实现，别在这儿另算一套
+_spec = importlib.util.spec_from_file_location("eval_screenagent", ROOT / "scripts" / "eval_screenagent.py")
+_E = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_E)
+
+SCREENAGENT_METRICS = ["Op.F1 macro", "Op.F1 micro", "Step SR ≤0.10", "Step SR ≤0.14"]
+
 SCREENSPOT = [
-    ("Qwen2.5-VL-3B 基座", "grounding_base.json"),
-    ("Qwen2.5-VL-3B 微调", "grounding_lora2sp.json"),
-    ("Qwen3.5-4B 基座", "grounding_q35_base.json"),
-    ("Qwen3.5-4B 微调", "grounding_q35_2sp.json"),
+    ("基座", ["grounding_base.json"]),
+    ("交付配置", ["grounding_q25_lm.json"]),
+    ("加对齐层（对照）", ["grounding_q25_proj.json"]),
 ]
 TOKEN_CURVES = {
-    "Qwen3.5-4B 基座": [(320, "grounding_q35_base_320.json"), (640, "grounding_q35_base_640.json"),
-                       (1280, "grounding_q35_base.json"), (1920, "grounding_q35_base_1920.json")],
     "Qwen2.5-VL-3B 基座": [(320, "grounding_base_320.json"), (640, "grounding_base_640.json"),
                           (1280, "grounding_base.json"), (1920, "grounding_base_1920.json")],
 }
 SCREENAGENT = [
-    ("Qwen2.5 基座 一段式", ["screenagent_base_cases.json"]),
-    ("Qwen2.5 基座 两段式", ["screenagent_base_2s_256.json"]),
-    ("Qwen2.5 微调 两段式", ["screenagent_lora2sp_2s_fix.json", "screenagent_lora2sp_2s.json"]),
-    ("Qwen3.5 基座 一段式", ["screenagent_q35_base_cases.json"]),
-    ("Qwen3.5 基座 两段式", ["screenagent_q35_base_2s.json"]),
-    ("Qwen3.5 微调 两段式", ["screenagent_q35_2sp_2s.json"]),
+    ("基座", ["screenagent_q25_base_2s.json"]),
+    ("交付配置", ["screenagent_q25_lm_2s.json"]),
+    ("加对齐层（对照）", ["screenagent_q25_proj_2s.json"]),
 ]
-PROMPTS = [("Qwen3.5-4B 基座", "prompt_q35_2s.json"), ("Qwen2.5-VL-3B 基座", "prompt_q25_2s.json")]
-TRAINING = [("Qwen2.5-VL-3B", "train_lora_2sp.json"), ("Qwen3.5-4B", "train_q35_2sp.json")]
+PROMPTS = [("基座", "prompt_q35_2s.json")]
+# 两条曲线是导师方法论里的两档冻结策略，不是同一配方的两次迭代
+TRAINING = [("交付配置：只训语言模型 LoRA", "train_q25_lm.json"),
+            ("对照：加对齐层全量训练", "train_q25_proj.json")]
 
 
 def load(name: str):
@@ -113,8 +117,8 @@ def _bars(plt, groups, series, title, ylabel, path):
 def chart_screenspot(plt) -> bool:
     keys = [("总体", "总体"), ("windows", "Windows"), ("macos", "macOS"), ("text", "文本"), ("icon", "图标")]
     series = []
-    for label, name in SCREENSPOT:
-        d = load(name)
+    for label, names in SCREENSPOT:
+        d = next((x for x in (load(n) for n in names) if x), None)
         if not d:
             continue
         acc = d["accuracy"]
@@ -163,16 +167,25 @@ def chart_tokens(plt) -> bool:
     return True
 
 
+def action_metrics(d: dict) -> list:
+    """Op.F1 macro / micro、Step SR ≤0.10 / ≤0.14，口径与 score_actions.py 和报告一致。"""
+    cases = d.get("cases") or []
+    if not cases:
+        return [None] * 4
+    f1 = _E.op_f1(cases)
+    return [f1["macro_f1"], f1["micro_f1"],
+            _E.step_success(cases, 0.10), _E.step_success(cases, 0.14)]
+
+
 def chart_screenagent(plt) -> bool:
-    metrics = ["动作类型准确率", "类型对且点准", "键盘召回"]
     series = []
     for label, names in SCREENAGENT:
         d = next((x for x in (load(n) for n in names) if x), None)
         if d:
-            series.append((label, [d.get("type_accuracy"), joint_accuracy(d), d.get("keyboard_recall")]))
+            series.append((label, action_metrics(d)))
     if not series:
         return False
-    _bars(plt, metrics, series, "ScreenAgent test 353 条（生成上限 256）", "比例",
+    _bars(plt, SCREENAGENT_METRICS, series, "ScreenAgent test 353 条（生成上限 256）", "比例",
           OUT / "screenagent_metrics.png")
     return True
 
@@ -218,8 +231,8 @@ def chart_training(plt) -> bool:
 
 # 日志名到图例名：日志名带 live_ / vm_ 前缀和 _suite 后缀，图上读着费劲
 SUITE_LABELS = {
-    "q35_2sp": "Qwen3.5 微调", "q35_base": "Qwen3.5 基座", "q25_2sp": "Qwen2.5 微调",
-    "q35_2sp_1080p": "Qwen3.5 微调 1920×1080",
+    "q25_proj": "对齐层全量 + 语言模型 LoRA", "q25_lm": "只训语言模型 LoRA",
+    "q25_base": "基座", "q25_2sp": "微调（上一版数据）",
 }
 
 

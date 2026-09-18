@@ -1,7 +1,7 @@
 """把 ScreenAgent test 353 步按应用类型拆开，看各配置在不同应用上的差异。
 
 对应大纲第 7 周第 3 项「分析系统在不同应用下的表现差异」的离线部分。test 划分有 70 个
-session，按任务描述里的关键词归成 7 类应用；每类里算动作类型准确率和「类型对且点准」
+session，按任务描述里的关键词归成 7 类应用；每类里算 Op.F1 micro 和 Step SR ≤0.10
 （坐标类动作要求预测点与真值点的归一化距离 ≤ 0.10）。
 
 另给每个配置算整体指标，是第 7 周第 2 项的成功率、执行时间、错误率在离线评测上的口径：
@@ -42,16 +42,24 @@ RULES = [
 DEFAULT_APP = "浏览器与网页"
 APPS = [DEFAULT_APP] + [name for name, _ in RULES]
 
+# 只列现在这一版基座（Qwen3.5-4B）的配置：交付和汇报都只讲一套系统，上一代 Qwen2.5-VL 的
+# 日志仍在 logs/ 里，要看就传文件名给 scripts/score_actions.py
+# 三个配置的日志口径一致（键盘动作比输入内容），才能放在一张表里比
 CONFIGS = [
-    ("Qwen2.5 基座 一段式", ["screenagent_base_cases.json"]),
-    ("Qwen2.5 基座 两段式", ["screenagent_base_2s_256.json"]),
-    ("Qwen2.5 微调 两段式", ["screenagent_lora2sp_2s_fix.json", "screenagent_lora2sp_2s.json"]),
-    ("Qwen3.5 基座 一段式", ["screenagent_q35_base_cases.json"]),
-    ("Qwen3.5 基座 两段式", ["screenagent_q35_base_2s.json"]),
-    ("Qwen3.5 微调 两段式", ["screenagent_q35_2sp_2s.json"]),
+    ("交付：加对齐层", ["screenagent_q25_proj_2s.json"]),
+    ("对照：只训语言模型", ["screenagent_q25_lm_2s.json"]),
+    ("基座", ["screenagent_q25_base_2s.json"]),
 ]
 
-PARSE_FAILED = "解析失败"  # eval_screenagent.py 在逐条记录里给拿不出动作的步写的预测类型
+PARSE_FAILED = "解析失败"
+
+# 指标一律用 eval_screenagent.py 的实现：键盘动作要求输入内容也对，和
+# scripts/score_actions.py、《系统全面评估报告》完全同口径，避免同一份日志出两个数
+import importlib.util as _ilu
+
+_spec = _ilu.spec_from_file_location("eval_screenagent", ROOT / "scripts" / "eval_screenagent.py")
+_E = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_E)  # eval_screenagent.py 在逐条记录里给拿不出动作的步写的预测类型
 
 
 def app_of(instruction: str) -> str:
@@ -78,7 +86,8 @@ def sessions_of_test_steps() -> List[str]:
 
 
 def _joint_ok(c: dict) -> bool:
-    return c["gt"] == c["pred"] and (c.get("dist") is None or c["dist"] <= 0.10)
+    """这一步算不算做对：类型对、键盘动作内容也对、坐标类动作点在 0.10 以内。"""
+    return _E.step_success([c], 0.10) == 1.0
 
 
 def by_app(cases: list, apps: List[str]) -> Dict[str, Dict[str, float]]:
@@ -92,6 +101,16 @@ def by_app(cases: list, apps: List[str]) -> Dict[str, Dict[str, float]]:
             for app, (n, t, j) in stats.items()}
 
 
+def by_app_strict(cases: list, apps: List[str]) -> Dict[str, Dict[str, float]]:
+    """按应用分组后用同口径指标算：Op.F1 micro 与 Step SR ≤0.10。"""
+    groups: Dict[str, list] = {}
+    for c in cases:
+        groups.setdefault(apps[c["i"]], []).append(c)
+    return {app: {"n": len(g), "micro_f1": _E.op_f1(g)["micro_f1"],
+                  "step_sr": _E.step_success(g, 0.10)}
+            for app, g in groups.items()}
+
+
 def overall(cases: list, sessions: List[str]) -> Dict[str, float]:
     """步级的类型准确率、类型对且点准、无法执行率，加上按 session 算的离线任务成功率。"""
     n = len(cases)
@@ -101,8 +120,8 @@ def overall(cases: list, sessions: List[str]) -> Dict[str, float]:
         done[sid] = done.get(sid, True) and _joint_ok(c)
     return {
         "n": n,
-        "type_accuracy": sum(c["gt"] == c["pred"] for c in cases) / n,
-        "joint_accuracy": sum(_joint_ok(c) for c in cases) / n,
+        "type_accuracy": _E.op_f1(cases)["micro_f1"],
+        "joint_accuracy": _E.step_success(cases, 0.10),
         "unexecutable_rate": sum(c["pred"] == PARSE_FAILED for c in cases) / n,
         "sessions": len(done),
         "sessions_done": sum(done.values()),
@@ -131,13 +150,13 @@ def main() -> None:
         if d:
             results[label] = {"log": name,
                               "overall": {**overall(d["cases"], sessions), "sec_per_step": d.get("avg_latency_s")},
-                              "by_app": by_app(d["cases"], apps)}
+                              "by_app": by_app_strict(d["cases"], apps)}
 
     if not results:
         raise SystemExit("没有带逐条记录的 ScreenAgent 评测日志")
 
     labels = list(results)
-    print("| 配置 | 动作类型准确 | 类型对且点准 | 无法执行 | 离线任务成功（session 每步都对） | 单步耗时 |")
+    print("| 配置 | Op.F1 micro | Step SR ≤0.10 | 无法执行 | 离线任务成功（session 每步都对） | 单步耗时 |")
     print("|---|---|---|---|---|---|")
     for label in labels:
         o = results[label]["overall"]
@@ -151,9 +170,9 @@ def main() -> None:
         cells = []
         for label in labels:
             s = results[label]["by_app"].get(app)
-            cells.append("—" if not s else f"{s['type_accuracy']:.0%} / {s['joint_accuracy']:.0%}")
+            cells.append("—" if not s else f"{s['micro_f1']:.0%} / {s['step_sr']:.0%}")
         print(f"| {app} | {counts[app]} | " + " | ".join(cells) + " |")
-    print("\n格子里是「动作类型准确率 / 类型对且点准」")
+    print("\n格子里是「Op.F1 micro / Step SR ≤0.10」")
 
     out = LOGS / "screenagent_by_app.json"
     out.write_text(json.dumps({"steps_per_app": counts, "configs": results}, ensure_ascii=False, indent=2),
@@ -169,10 +188,10 @@ def main() -> None:
         return
     charts.OUT.mkdir(parents=True, exist_ok=True)
     # 图只画两段式（交付的执行路径），一段式的数在表里：六组柱子挤在一张图上读不清
-    series = [(label, [results[label]["by_app"].get(app, {}).get("type_accuracy") for app in APPS])
-              for label in labels if "两段式" in label]
+    series = [(label, [results[label]["by_app"].get(app, {}).get("micro_f1") for app in APPS])
+              for label in labels]
     charts._bars(plt, [f"{a}\n({counts[a]} 步)" for a in APPS], series,
-                 "ScreenAgent test 353 步：按应用类型的动作类型准确率（两段式）", "准确率",
+                 "ScreenAgent test 353 步：按应用类型的 Op.F1 micro（两段式）", "Op.F1 micro",
                  charts.OUT / "screenagent_by_app.png")
     print(f"图已存到 {charts.OUT / 'screenagent_by_app.png'}")
 

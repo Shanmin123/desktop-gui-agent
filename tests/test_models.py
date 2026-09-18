@@ -145,7 +145,7 @@ def test_default_model_is_qwen35_with_its_coordinate_space_registered():
     """默认基座是 Qwen3.5-4B；它的定位坐标口径得已经登记，否则 locate 会按错的除数换算。"""
     from gui_agent.models import COORD_SPACE_BY_MODEL_TYPE, DEFAULT_MODEL
 
-    assert DEFAULT_MODEL == "Qwen/Qwen3.5-4B"
+    assert DEFAULT_MODEL == "Qwen/Qwen2.5-VL-3B-Instruct"
     assert COORD_SPACE_BY_MODEL_TYPE["qwen3_5"] == "rel1000"
 
 

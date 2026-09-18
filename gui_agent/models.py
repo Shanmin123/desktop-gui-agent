@@ -21,7 +21,7 @@ import numpy as np
 
 # 主基座 Qwen3.5-4B；上一代 Qwen2.5-VL-3B-Instruct 留作对照，用 --model 指定。
 # 两代的差别（切块系数、思考模式、定位坐标口径）在本文件里按模型处理，脚本不用分支。
-DEFAULT_MODEL = "Qwen/Qwen3.5-4B"
+DEFAULT_MODEL = "Qwen/Qwen2.5-VL-3B-Instruct"
 
 # 让模型只回坐标，不要解释。要求 JSON 是因为比自由文本好解析。
 #
